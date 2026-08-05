@@ -2,38 +2,21 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"io"
 	"os"
-
-	"github.com/joho/godotenv"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func main() {
-	// Load .env file
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
+	if err := run(os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "mcp-host: unable to write bootstrap status")
+		os.Exit(1)
 	}
+}
 
-	fmt.Println("MCP Host (Go) starting...")
-	fmt.Println("Project structure initialized successfully.")
-
-	// Verify mark3labs/mcp-go dependency integration
-	clientInfo := mcp.Implementation{
-		Name:    "mcp-host",
-		Version: "1.0.0",
+func run(out io.Writer) error {
+	_, err := fmt.Fprintln(out, "MCP Host bootstrap complete. Integrations are not configured or started.")
+	if err != nil {
+		return fmt.Errorf("write bootstrap status: %w", err)
 	}
-	fmt.Printf("MCP Client setup initialized for implementation: %s (v%s)\n", clientInfo.Name, clientInfo.Version)
-
-	// Check package availability
-	_ = client.NewStdioMCPClient
-
-	// Placeholder for future initialization logic
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		log.Println("Warning: GEMINI_API_KEY is not set")
-	} else {
-		log.Println("Gemini API Key detected.")
-	}
+	return nil
 }
