@@ -72,3 +72,27 @@
 **Full suite:** `go test ./...` all PASS. Coverage `internal/mcpclient` = **86.4%** (≥ 80% per TDD §11).
 
 **Result:** TEST-00020 through TEST-00027 all PASS (8 scenarios). No defects found.
+
+---
+
+## FEAT-00004 - MCP JSON Schema → Gemini Function-Declaration Mapper
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit (`go test ./internal/mapping -v -count=1`, 28 subtests)
+
+| ID | Scenario | Test | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00028 | Full supported subset lossless | `TestMapTools_FullSupportedSubsetLossless` | PASS | DeepEqual exact match (string/integer/number/boolean/array/items/enum[]any+[]string/nested+root required) |
+| TEST-00029 | No-arg tool → empty schema | `TestMapTools_emptyPropertiesNoArgTool` | PASS | Empty non-nil Parameters.Properties |
+| TEST-00030 | Unsupported type rejected | `TestMapTools_rejectsUnsupportedType` (5 cases) | PASS | `errors.Is` matches; tool+field in msg |
+| TEST-00031 | Nested unsupported carries full path | `TestMapTools_rejectsNestedUnsupportedWithPath` | PASS | `config.inner.x` present |
+| TEST-00032 | Malformed schema rejected | `TestMapTools_rejectsMalformedPropertySchema` (6 cases) | PASS | Tool name present |
+| TEST-00033 | Non-string enum member rejected | `TestMapTools_rejectsNonStringEnumMember` | PASS | Tool + field path |
+| TEST-00034 | Duplicate tool names rejected | `TestMapTools_rejectsDuplicateToolNames` | PASS | `ErrDuplicateName` |
+| TEST-00035 | Cyclic schema guarded | `TestMapTools_recursionGuardOnCyclicSchema` | PASS | No stack overflow |
+| TEST-00036 | Over-deep nesting guarded | `TestMapTools_recursionGuardDeepNesting` | PASS | Error at depth limit |
+
+**Full suite:** `go test ./...` all PASS. Coverage `internal/mapping` = **83.1%** (≥ 80% per TDD §11).
+
+**Result:** TEST-00028 through TEST-00036 all PASS (9 scenarios). No defects found.

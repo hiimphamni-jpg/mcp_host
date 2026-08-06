@@ -5,7 +5,7 @@
 | FEAT-00001 | Bootstrap Go module, dependency baseline, and CLI composition root | P0 | S1 | ✅ | ✅ | ✅ | DONE |
 | FEAT-00002 | Configuration validation and safe Filesystem MCP process policy | P0 | S1 | ✅ | ✅ | ✅ | DONE |
 | FEAT-00003 | Stdio MCP client lifecycle: initialize, discovery, call, timeout, cleanup | P0 | S1 | ✅ | ✅ | ✅ | DONE |
-| FEAT-00004 | MCP JSON Schema to Gemini function-declaration mapper | P0 | S1 | ⬜ | ⬜ | ⬜ | SPRINT BACKLOG |
+| FEAT-00004 | MCP JSON Schema to Gemini function-declaration mapper | P0 | S1 | ✅ | ✅ | ✅ | DONE |
 | FEAT-00005 | Gemini provider adapter and conversation request/response mapping | P0 | S1 | ⬜ | ⬜ | ⬜ | SPRINT BACKLOG |
 | FEAT-00006 | Bounded agentic loop, tool-result context, cancellation, and error handling | P0 | S1 | ⬜ | ⬜ | ⬜ | SPRINT BACKLOG |
 | FEAT-00007 | Headless CLI prompt input and final-response output | P1 | S1 | ⬜ | ⬜ | ⬜ | SPRINT BACKLOG |
