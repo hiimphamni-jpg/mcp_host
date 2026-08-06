@@ -166,3 +166,80 @@ Approach: TDD red → green for Steps 4 and 5. Steps 1–3 are tiny separate fil
   - `go build ./...` → PASS
   - `go vet ./...` → PASS
   - `go test ./internal/llm/...` → PASS
+---
+
+# /build Execution Log ? FEAT-00006: Bounded agentic loop, tool-result context, cancellation, and error handling
+
+Plan: artifacts/superpowers/plan.md (user replied APPROVED for the full flow).
+Design authority: docs/adr/ADR-0001-internal-agent-architecture.md (D1-D4). ADR is authoritative; plan pseudo-steps reconciled to the ADR's ToolCaller seam (D2).
+
+Plan summary: Step 1 skeleton+errors; Step 2 neutral schema validator; Step 3 result bounding + safe error mapping; Step 4 Run loop; Step 5 fake-driven tests; Step 6 cmd/server wiring; Step 7 quality gates + REGISTRY DEV.
+
+## Step 1: Agent package skeleton + types + sentinel errors
+- Files: internal/agent/errors.go, internal/agent/agent.go, internal/agent/agent_test.go (construction tests)
+- Agent: /dev (TDD red -> green)
+- Changes:
+  - Neutral Options{LLM llm.LLM; Tools ToolCaller; Schemas map[string]any; MaxIterations; MaxResultBytes}; Agent{ToolCaller seam per ADR-0001 D2} - agent defines its own SDK-free ToolCaller, no mcp-go/genai import.
+  - Sentinel ErrIterationLimit + typed agent.Error{Cause, Operation} mirroring internal/llm/errors.go style (user-safe message).
+  - New() rejects nil LLM, nil Tools, non-positive limits; Run() placeholder returns ErrIterationLimit (loop body in Step 4).
+- Verify: go build ./... -> PASS; go test ./internal/agent/... -> 6 tests PASS (incl. placeholder iteration-limit).
+
+## Step 2: Neutral schema-argument validator
+- Files: internal/agent/schema.go, internal/agent/schema_test.go
+- Agent: /dev (TDD red -> green)
+- Changes:
+  - Stdlib-only validateArgs(schema map[string]any, args map[string]any) error for the MVP subset: object props, required, string/number/integer/boolean/array+items, enum; mirrors internal/mapping subset without importing it (no genai). Unknown keys lenient; empty/untyped schema unconstrained.
+  - Secret-safe messages (field names + Go type names only, never embedded values); numeric looseEqual so integer enum members match float64 args.
+- Verify: go test ./internal/agent/... -> 14 tests PASS (one red test fixed: nil value for object prop correctly rejected).
+
+## Step 3: Tool-result bounding + safe error mapping
+- Files: internal/agent/results.go, internal/agent/results_test.go
+- Agent: /dev (TDD red -> green)
+- Changes:
+  - BoundedResult(tr *llm.ToolResult, maxBytes) serializes Response to JSON, truncates to MaxResultBytes with explicit '...[truncated]' marker (works on the already-neutral llm.ToolResult from the ToolCaller seam, per ADR-0001 D2).
+  - MessageResult / ErrorResult map failures to bounded, non-secret context; ErrorResult never embeds err.Error() (no secret/path leak); deadline/cancel labels only.
+- Verify: go test ./internal/agent/... -run Result -> 7 PASS (truncation marker, no-secret, deadline/cancel mapping, nil).
+
+## Step 4: Agent loop (Run) - main logic
+- Files: internal/agent/agent.go (extend)
+- Agent: /dev
+- Changes:
+  - Full bounded loop per plan pseudo-code + ADR-0001 D2/D3/D4: history starts with the user prompt; each iteration calls LLM.Generate with the neutral Request (Contents + sorted ToolNames); final text with no tool calls returns directly; tool-call turns append a model Message with the calls, execute each call sequentially through the ToolCaller seam, and append a user Message with the bounded ToolResults.
+  - Terminal errors: caller cancellation (context.Canceled) propagates immediately (checked before each tool call and after a failed CallTool — D3 precedence); LLM timeout/provider failures wrap into typed agent.Error.
+  - Non-terminal: unknown tool name -> "action unavailable", schema-invalid args -> "arguments failed validation", MCP call failure -> ErrorResult (bounded, non-secret), success -> BoundedResult capped to MaxResultBytes.
+  - Loop exits with ErrIterationLimit after MaxIterations iterations without a final answer.
+- Verify: go test ./internal/agent/... -run TestRun -> PASS (all 12 Run subtests, incl. truncation + no-secret).
+
+## Step 5: Agent unit tests with fakes
+- Files: internal/agent/agent_test.go (extend), internal/agent/errors_test.go (extend), internal/agent/schema_test.go (extend)
+- Agent: /dev (TDD)
+- Changes:
+  - stubLLM scripts a response sequence and records Requests; stubMCP returns fixed results/errors by tool name, records the contexts, and can fire a cancel() on first call to simulate in-flight cancellation. simpleSchemas declares one tool with a required string property.
+  - Tests: final text direct; single tool call -> final text (result fed back); multiple tool calls in one turn run sequentially in request order; iteration limit -> ErrIterationLimit; unknown tool -> safe bounded result (caller never invoked); invalid args -> safe bounded result; MCP failure -> bounded generic result (no raw error/stacktrace leak); pre-cancelled ctx -> context.Canceled with zero tool invocations; mid-loop cancel -> Canceled and no second tool call, CallTool received the cancelled context; cancel overrides a bounded tool error; result truncated to max bytes with marker; secret content not in final output.
+  - New() validation tests (nil LLM/nil Tools/non-positive limits rejected); classifyGenerateError passthrough + sanitization; schema-helper edge tests ([]any required, []string enum, int-family numeric kinds) added to lift coverage past the 80% target.
+- Verify: go test ./internal/agent/... -count=1 -> PASS; coverage 91.5% (target >= 80%).
+
+## Step 6: Wire the pipeline in cmd/server
+- Files: cmd/server/main.go (rewrite run), cmd/server/main_test.go (extend)
+- Agent: /dev
+- Changes:
+  - run(out, args...) parses a --prompt flag (FlagSet, ContinueOnError). Without --prompt it keeps the bootstrap status contract; with --prompt it runs the full composition-root pipeline: policy.New -> mcpclient.NewStdio -> Initialize -> ListTools -> mapping.MapTools -> declsByName -> llm.New -> agent.New with neutral Schemas (built per tool via JSON round-trip of mcp.Tool.InputSchema) + limits -> agent.Run -> print final text.
+  - mcpToolCaller adapts mcpclient.Client to the agent's SDK-free ToolCaller seam (ADR-0001 D2): converts mcp.TextContent / mcp.EmbeddedResource(TextResourceContents) into a neutral llm.ToolResult with content text and isError flag; forwards the caller context verbatim so cancellation reaches the in-flight MCP call.
+  - defer client.Close() after NewStdio on every path (AC4: no orphan). Full stdout/exit-code contract remains FEAT-00007.
+  - Smoke test: unconfigured invocation (no --prompt) ends cleanly with the bootstrap message, touching no real Gemini/MCP in CI. Adapter unit tests cover text/embedded conversion, isError flag, error+context propagation, and neutralSchema round-trip.
+- Verify: go build ./... -> PASS; go vet ./... -> PASS; go test ./cmd/server/... -count=1 -v -> 10 tests PASS.
+
+## Step 7: Cross-package quality gates
+- Files: none new (docs/REGISTRY.md updated)
+- Agent: /dev
+- Changes:
+  - gofmt -l . -> empty; go build ./... -> PASS; go vet ./... -> PASS; go test ./... -count=1 -> all packages PASS (cmd/server, agent, config, llm, mapping, mcpclient, policy).
+  - internal/agent statement coverage 91.5% (target >= 80%); grep for genai/mcp-go in internal/agent matches comments only — no import crosses into the package.
+  - docs/REGISTRY.md: FEAT-00006 DEV column -> done, Status -> IN PROGRESS (TEST/QC pending).
+- Verify: go test ./... -count=1 -> PASS; go vet ./... -> PASS; gofmt -l . -> empty.
+
+## Review pass (before finish)
+- 🔴 Blockers: none.
+- 🟠 Majors: none.
+- 🟡 Minors: `defer client.Close()` ignores a close error in runAgentLoop — intentional (primary operation error is returned; Close failure after a completed agent loop is not actionable). No orphan risk: Close is still always called.
+- ⚪ Nits: none.

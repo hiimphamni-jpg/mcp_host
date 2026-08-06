@@ -125,3 +125,37 @@
 **Full suite:** `go test ./...` all PASS. Coverage `internal/llm` = **90.4%** (≥ 80% per TDD §11).
 
 **Result:** TEST-00037 through TEST-00050 all PASS (14 scenarios). No defects found.
+
+---
+
+## FEAT-00006 - Bounded Agentic Loop, Tool-Result Context, Cancellation, Error Handling
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit (`go test ./internal/agent -v -count=1`, 37 tests)
+
+| ID | Scenario | Test | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00051 | Final text returned directly | `TestRun_returnsFinalTextDirectly` | PASS | LLM called once, text returned |
+| TEST-00051b | Single tool call then final text (AC3) | `TestRun_singleToolCallThenFinalText` | PASS | Tool executed, result fed back, final text |
+| TEST-00052 | Multiple tool calls sequential (D4) | `TestRun_multipleToolCallsInOneTurn` | PASS | Both executed in order |
+| TEST-00053 | Iteration limit → ErrIterationLimit | `TestRun_iterationLimit` | PASS | `errors.Is(ErrIterationLimit)` |
+| TEST-00054 | Unknown tool → safe result | `TestRun_unknownToolBecomesSafeResult` | PASS | MCP not called; action unavailable |
+| TEST-00055 | Invalid args → safe result | `TestRun_invalidArgsBecomesSafeResult` | PASS | MCP not called; validation message |
+| TEST-00056 | MCP failure → bounded result, loop continues (AC4) | `TestRun_mcpFailureBecomesBoundedResult` | PASS | No crash; final text reached |
+| TEST-00057 | Cancellation propagates + terminates (D3) | `TestRun_cancellationPropagatesToToolAndTerminates`, `TestRun_cancellationMidLoopStops` | PASS | `context.Canceled`; ctx reached tool |
+| TEST-00058 | Cancel overrides bounded tool error | `TestRun_cancellationMidLoopOverridesBoundedToolError` | PASS | Canceled returned, not bounded result |
+| TEST-00059 | Result truncated with marker | `TestRun_resultIsTruncated` | PASS | `...[truncated]` present; ≤ cap |
+| TEST-00060 | Secret content not in output | `TestRun_secretContentNotInOutput` | PASS | Sentinel absent |
+| TEST-00061 | Validator happy path | `TestValidateArgs_ok`, `..._nestedObject`, `..._arrayItems`, `..._numberNumericKinds` | PASS | Valid args pass |
+| TEST-00062 | Validator negative/boundary | `TestValidateArgs_missingRequired`, `_wrongType`, `_enumMismatch`, `_integerEnumMatchesFloat`, `_requiredAsJSONDecodedArray`, `_enumAsStringSlice`, `_emptySchemaNoArgs` | PASS | All invalid rejected; edge cases correct |
+| TEST-00063 | Options validation | `TestNew_rejectsInvalidOptions`, `TestNew_acceptsValidOptions` | PASS | Nil/invalid rejected; valid accepted |
+| TEST-00064 | Errors user-safe + unwrap sentinels | `TestError_MessageDoesNotLeakCause`, `TestError_UnwrapPreservesSentinel`, `TestIterationLimitError_IsSentinel`, `TestClassifyGenerateError` | PASS | No cause leak; errors.Is works |
+
+**Result-bounding units:** `TestBoundedResult_noTruncation/truncationMarker/nilResult`, `TestErrorResult_noRawErrorLeak/deadlineMapping/cancelledMapping`, `TestMessageResult` — all PASS.
+
+**Architecture gate:** `internal/agent` direct imports = only `internal/llm` (neutral); no `genai`/`mcp-go` (verified via source grep + `go list -deps`). AC5 + ADR-0001 D2 confirmed.
+
+**Full suite:** `go test ./...` all PASS. Coverage `internal/agent` = **91.5%** (≥ 80% per TDD §11).
+
+**Result:** TEST-00051 through TEST-00064 all PASS (16 scenarios). No defects found.
