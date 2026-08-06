@@ -1,122 +1,81 @@
-# Plan — FEAT-00004: MCP JSON Schema → Gemini function-declaration mapper
+# Plan — FEAT-00005: Gemini provider adapter and conversation request/response mapping
 
 ## Goal
-Create `internal/mapping`, which converts discovered MCP `mcp.Tool` definitions into Gemini
-`*genai.FunctionDeclaration` objects. Per TDD §6 and AC2 / business-logic §6, the mapping must:
-1. Support the MVP JSON Schema subset: object properties + nested objects; `string`, `number`,
-   `integer`, `boolean`, `array`; `enum`, `required`, and array `items`.
-2. Preserve required fields, enums, and nested properties losslessly.
-3. Reject unsupported or malformed schemas with an error that includes the **tool name and field
-   path** (TDD §6).
-4. Reject duplicate tool names rather than silently overwriting them (TDD §6, multi-server safety).
-5. Depend only on `mcp-go` types (input) and `genai` types (output). It must **not** depend on
-   `internal/agent`, `internal/llm`, or `internal/mcpclient`, keeping `agent` SDK-free (AC5).
 
-Scope is strictly the mapper (TDD §6 + AC2). Schema-based **argument validation** of a received
-tool call (the "same schema used to validate tool-call arguments") is deferred to the agent loop
-(FEAT-00006), which will reuse the built `*genai.Schema`.
+Create the `internal/llm` package containing (1) a provider-neutral `LLM` interface plus neutral conversation types, and (2) a Gemini adapter that wires declared tools and conversation history into `genai.GenerateContent` calls and maps the provider response (final text, or requested function calls) back into neutral types. `internal/agent` (FEAT-00006) will depend only on the neutral `LLM` interface, not on `mcp-go` or the Gemini SDK (TDD §2.1 / business-logic AC5).
 
 ## Assumptions
-- Input type is `mcp.Tool` with `Name`, `Description`, and `InputSchema` (`ToolInputSchema` exposing
-  `Type`, `Properties map[string]any`, `Required []string`, `AdditionalProperties`).
-- Property schemas are `map[string]any` with a `"type"` string plus optional `"description"`,
-  `"enum"` (JSON array), `"properties"` (nested), `"items"` (array item), `"required"` (nested
-  object), and scalar constraints. Concrete helper keys come from `mcp-go` `With*` property options.
-- Output is `*genai.FunctionDeclaration{Name, Description, Parameters *genai.Schema}`. The
-  `genai.Schema` uses `genai.Type*` enums (`TypeString/NUMBER/INTEGER/BOOLEAN/ARRAY/OBJECT`),
-  `Properties map[string]*genai.Schema`, `Required []string`, `Enum []string`, and `Items *genai.Schema`.
-- New package lives at `internal/mapping` (TDD §2.1 doesn't list a mapper module; a dedicated
-  cross-adapter package is cleanest so both `agent` and `llm` stay SDK-free and the conversion is
-  unit-testable in isolation). Dependency direction: `mapping` → `mcp-go` + `genai` only.
-- MVP runs a single MCP server (business-logic §7), but duplicate tool-name detection is still
-  implemented so a future multi-server host fails safe.
-- Typed errors in `internal/mapping` (e.g. `ErrUnsupportedType`, `ErrDuplicateName`) wrap context
-  via helper `fmt.Errorf("tool %q field %q: %w", ...)`.
+
+- `internal/mapping` already produces `genai.FunctionDeclaration` (FEAT-00004 Done) and is the fixture that converts MCP `tools/list` output into declarations.
+- The Gemini adapter wraps the real GenAI SDK (`google.golang.org/genai v1.66.0`, already a direct dependency in `go.mod`). The `LLM` interface + neutral `Request`/`Response`/`Message` types stay SDK-free.
+- `agent` owns tool-declaration preparation in FEAT-00006; the neutral `Request` carries only tool *names* as an indirection so the adapter never re-runs JSON-Schema mapping. This is recorded as an Open Decision below so `/architect` can confirm before FEAT-00006 starts.
+- Per-prompt timeout comes from `LLM_TIMEOUT` applied via `context.WithTimeout`; a timeout must surface a typed, user-safe error and must not log the API key (rules/security.md, rules/error-handling.md).
+- All columns for FEAT-00005 are empty (SPRINT BACKLOG); DEV ⬜. This plan delivers DEV output only.
 
 ## Plan
 
-### Step 1: Define package surface, public entrypoint, and typed errors
-- **Files**: `internal/mapping/mapping.go`, `internal/mapping/errors.go`
+### Step 1: `internal/llm` — neutral conversation types
+- **Files**: `internal/llm/message.go`
 - **Agent**: /dev
-- **Change**: Define `func MapTools(tools []mcp.Tool) ([]*genai.FunctionDeclaration, error)` as the
-  public entrypoint. Define package errors `ErrUnsupportedType`, `ErrDuplicateName`, `ErrMalformed`
-  (unexported sentinel + exported `Error` type wrapping name/path) implementing `error`. Declare the
-  internal helpers this package will use (`mapSchema`, `mapType`) as signatures so tests are stable.
-- **Verify**: `go build ./... && go vet ./...`
+- **Change**: Define SDK-free `Role` (`RoleUser`, `RoleModel`), `Message{Role, Text, ToolCalls, ToolResults}`, `ToolCall{Name, Arguments}`, `ToolResult{Name, Response}`, and `Response{Text, ToolCalls}`. No `genai` import.
+- **Verify**: `go build ./internal/llm/...`
 - **Duration**: ~5 min
 
-### Step 2. Primitive type + scalar field mapping
-- **Files**: `internal/mapping/schema.go`
+### Step 2: `internal/llm` — provider-neutral interface
+- **Files**: `internal/llm/interface.go`
 - **Agent**: /dev
-- **Change**: Implement `mapType(t string, path string) (genai.Type, error)` mapping the supported
-  strings (`object`,`string`,`number`,`integer`,`boolean`,`array`) to `genai.Type` enums and
-  rejecting anything else (incl. `null`, empty, `any`) with a path-bearing `ErrUnsupportedType`.
-  Implement conversion of a scalar property `map[string]any` → `*genai.Schema` (Type, Description,
-  Enum from JSON array of strings, per-type bound constraints if present).
-- **Verify**: `go build ./... && go vet ./...`
-- **Duration**: ~6 min
+- **Change**: Define `type LLM interface { Generate(ctx context.Context, req *Request) (*Response, error) }` and `Request{Contents []*Message, ToolNames []string}`. Document that agent depends only here (AC5).
+- **Verify**: `go vet ./internal/llm/...`
+- **Duration**: ~3 min
 
-### Step 3. Nested objects, arrays/items, and required — recursive schema builder
-- **Files**: `internal/mapping/schema.go`
+### Step 3: `internal/llm` — typed errors
+- **Files**: `internal/llm/errors.go`
 - **Agent**: /dev
-- **Change**: Implement `mapSchema(props map[string]any, required []string, path string)`
-  (`*genai.Schema, error`) that builds `Properties`/`Required`, recursing into object `properties`
-  and array `items`. Every rejection is annotated with tool field path (e.g. `tool.foo.bar`). Guard
-  against cyclic/oversized recursion depth to avoid stack overflow on malformed schemas.
-- **Verify**: `go build ./... && go vet ./...`
+- **Change**: Add sentinels `ErrTimeout`, `ErrProvider` (wrapping `errors.Is`) and a typed user-safe error with an `Operation` label; must not carry the API key or raw request text (business-logic §5). Mirror `internal/mcpclient/errors.go` style.
+- **Verify**: `go test ./internal/llm/...` (with Step 4 tests)
+- **Duration**: ~3 min
+
+### Step 4: `internal/llm` — pure conversion helpers + tests
+- **Files**: `internal/llm/convert.go`, `internal/llm/convert_test.go`
+- **Agent**: /dev (TDD: Red → Green)
+- **Change**: Pure helpers: `toGeminiContent(msg *Message) *genai.Content` (maps text parts and FunctionResponse/ToolResults per role); `toolCallToPart`, `toolResultToPart`; `responseToResponse(r *genai.GenerateContentResponse) *Response` (final `Text()` when no calls, else `FunctionCalls()` → `[]*ToolCall`). Tests cover: user text, model function call → part, tool result → user function part, empty candidates, mixed parts.
+- **Verify**: `go test ./internal/llm/... -run Convert`
 - **Duration**: ~7 min
 
-### Step 4. Tool entrypoint: name/description/parameters + duplicate rejection
-- **Files**: `internal/mapping/mapping.go`
-- **Agent**: /dev
-- **Change**: Implement `MapTools` that iterates `mcp.Tool` list, tracks seen names, returns
-  `ErrDuplicateName` on a repeat, and builds each `*genai.FunctionDeclaration` using the symlink
-  `Tool.Name`, `Description`, and `mapSchema` for the `InputSchema` (root `Parameters`). Preserve
-  `required`, `enum`, nested properties.
-- **Verify**: `go build ./... && go vet ./...`
-- **Duration**: ~5 min
-
-### Step 5. Unit table tests for mapping + rejection paths (AC2)
-- **Files**: `internal/mapping/mapping_test.go`
-- **Agent**: /test
-- **Change**: Table tests covering: full supported subset preserving required/enum/nested
-  properties/arrays (mirrors AC2); empty properties (no-arg tool); each unsupported type/malformed
-  schema returning a typed error whose message includes the tool name and field path; duplicate
-  tool names returning `ErrDuplicateName`; deep-nesting recursion guard.
-- **Verify**: `go test ./internal/mapping/... -count=1`
+### Step 5: `internal/llm` — Gemini adapter + tests
+- **Files**: `internal/llm/gemini.go`, `internal/llm/gemini_test.go`
+- **Agent**: /dev (TDD)
+- **Change**: `type modelsClient interface { GenerateContent(ctx, model string, contents []*Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) }`. Implement `Gemini` holding `model` name, `timeout`, `generator modelsClient`, prepared `declByTool map[string]*genai.FunctionDeclaration`. Constructor `New(client *genai.Client, cfg map, timeout)` sets `generator: client.Models`. `Generate`: build `[]*genai.Content`, build `&genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: decls}}}` for named tools, call under `context.WithTimeout(LM_TIMEOUT)`, wrap errors (`ErrTimeout` on `errors.Is(ctx, DeadlineExceeded)`), return `Response`. Tests inject a fake `modelsClient` (no network/credentials) covering text-only, tool-call, and timeout paths.
+- **Verify**: `go test ./internal/llm/...`
 - **Duration**: ~10 min
 
-### Step 6. Full verification + gofmt + review pass
-- **Files**: none new
+### Step 6: Wiring & repo-wide verification
+- **Files**: none new (unused-adapter check only; FEAT-00006 wires `internal/agent`).
 - **Agent**: /dev
-- **Change**: Run `gofmt -l .` (expect empty), `go build ./...`, `go vet ./...`, `go test ./...`;
-  confirm no existing packages (`config`/`policy`/`mcpclient`/`cmd/server`) changed or broken;
-  list 🔴/🟠/🟡/⚪ findings.
-- **Verify**: `gofmt -l .; go build ./...; go vet ./...; go test ./... -count=1`
+- **Change**: No production call site yet (agent is FEAT-00006). Ensure package compiles standalone and is exercised only by its own tests.
+- **Verify**: `go build ./...; go vet ./...; go test ./internal/llm/...`
 - **Duration**: ~4 min
 
 ## Risks & Mitigations
-- **Property key variance from MCP servers**: Filesystem server may emit `$defs`/`definitions`
-  (mcp-go `ToolArgumentsSchema.Defs`). The mapper assumes inline schemas (MVP subset per TDD §6);
-  a schema using `$ref`/`$defs` is treated as unsupported with a clear tool/path error rather than
-  silently mis-mapped. Mitigated: `/ba` confirm the Filesystem server stays within the MVP subset
-  during AC2 integration review (QA-00001/QA-00002).
-- **`enum` values as `[]any` vs `[]string`:** handle both via a type-asserting helper, rejecting
-  non-stringable enum members with path context.
-- **Recursion on malformed cyclic schema:** guard recursion depth; reject exceeding it.
-- **gemini/genai `Type` drift:** isolated to `mapType`; a table maps the string subset to enums and
-  fails loudly on drift.
-- **Mapper placement not in TDD §2.1 module list:** documented assumption; keeps `agent` clean and
-  is a small, isolated, easily-relocated package.
+
+- **genai `Models.GenerateContent` value-receiver signature vs fake**: Resolves because `client.Models` is `*Models` and implements the interface; tests use a fake `generator` — no network needed. Verify at Step 5.
+- **Tool-declaration hand-off unresolved**: Mitigate by keeping `Request.ToolNames` (names) + adapter-owned `map[name]*Declaration` prepared by agent; convert only once. Confirm with `/architect` before FEAT-00006.
+- **Timeout vs cancellation ambiguity**: use `context.WithTimeout` and map `context.DeadlineExceeded` to `ErrTimeout`; distinguish caller cancellation (context.Canceled) so agent (FEAT-00006) can cancel correctly.
+- **No credentials in tests**: unit tests rely purely on fake `generator`; no live API call, no `GEMINI_API_KEY` needed, cannot be a flaky/e2e.
 
 ## Rollback Plan
-`internal/mapping/` is brand new; no existing file is modified (no edits to `config`/`policy`/
-`mcpclient`/`cmd/server`). Rollback = delete `internal/mapping/`. No migration or config change.
+
+- All changes are additive to the new `internal/llm` package; no existing package is edited.
+- Revert by deleting `internal/llm/` (new files only) → `go build ./...` returns to prior green state (go.mod already had `genai`, no dependency change).
+- `git checkout` the single plan artifact if needed; no cross-module impact.
 
 ## Parallel Opportunities
-- ⚡ Step 1 (package API + error contract) can be authored in parallel with Step 2's standalone
-  `mapType`/types, since the scalar mapping is independent of the entrypoint.
-- ⚡ Step 5 test fixtures can be drafted against the Step 1 signatures while Steps 2–4 implement the
-  logic.
-- ❗ Steps 2–4 share `schema.go`/`mapping.go` and build dependencies (entrypoint → schema builder →
-  type mapping), so those run sequentially.
+
+- ⚡ Steps 1, 2, 3 can run in parallel (distinct files `message.go`, `interface.go`, `errors.go`, same package, no file-level conflict; symbols resolve at final compile).
+- Steps 4 → 5 are sequential (Step 5 depends on convert.go helpers + types/errors).
+- Step 6 is a verification pass gated on Steps 4–5.
+
+## Open Decisions (flag to /architect before FEAT-00006)
+
+1. Neutral `Request` carries `ToolNames []string` vs full neutral tool declarations. Recommendation: names + adapter-owned declaration map (single mapping via `internal/mapping`).
+2. Where `ctx` cancellation vs `LLM_TIMEOUT` should be split; confirm `agent` owns the per-prompt parent context (`business-logic §3`).

@@ -105,3 +105,64 @@ Approach: TDD red → green. Tests written first (RED: package undefined), then 
 - Agent: /dev
 - Changes: applied `gofmt -w` to remove formatting diffs; confirmed only `internal/mapping/*` added (untracked), no edits to `config`/`policy`/`mcpclient`/`cmd/server`.
 - Verify: `gofmt -l .` → empty; `go build ./...` → PASS; `go vet ./...` → PASS; `go test ./... -count=1` → PASS (28 subtests green); mapping coverage 83.1% (target ≥80%; QA-00001).
+
+---
+
+# /build Execution Log — FEAT-00005: Gemini provider adapter and conversation mapping
+
+Plan: `artifacts/superpowers/plan.md` (user replied APPROVED).
+
+Approach: TDD red → green for Steps 4 and 5. Steps 1–3 are tiny separate files (message.go/interface.go/errors.go) marked ⚡ parallel in the plan; executed sequentially (default), verified together.
+
+## Step 1: Neutral conversation types
+- Files: `internal/llm/message.go`
+- Agent: /dev
+- Changes:
+  - SDK-free `Role` (`RoleUser`/`RoleModel`), `Message{Role, Text, ToolCalls, ToolResults}`, `ToolCall{Name, Arguments}`, `ToolResult{Name, Response}`, `Response{Text, ToolCalls}`. No `genai` import.
+- Verify: `go build ./internal/llm/...` → PASS
+
+## Step 2: Provider-neutral interface
+- Files: `internal/llm/interface.go`
+- Agent: /dev
+- Changes:
+  - `type LLM interface { Generate(ctx context.Context, req *Request) (*Response, error) }`; `Request{Contents []*Message, ToolNames []string}`. Documented agent (FEAT-00006) depends only here (AC5).
+- Verify: `go vet ./internal/llm/...` → PASS (with Step 1 file)
+
+## Step 3: Typed errors
+- Files: `internal/llm/errors.go`
+- Agent: /dev
+- Changes:
+  - Sentinels `ErrTimeout`, `ErrProvider` (errors.Is via `Unwrap`); typed user-safe `*Error{Cause, Operation}` carrying only a non-sensitive operation label — never the API key or prompt text (business-logic §5, rules/security.md). Mirrors `internal/mcpclient/errors.go` style.
+- Verify: `go build ./internal/llm/...` + `go vet ./internal/llm/...` → PASS
+
+## Step 4: Pure conversion helpers + tests
+- Files: `internal/llm/convert.go`, `internal/llm/convert_test.go`
+- Agent: /dev (TDD: Red → Green)
+- Changes:
+  - `toGemContent` (text + FunctionResponse per role), `toolCallToPart`, `toolResultToPart`, `responseToResponse` (final text + `FunctionCalls()` → `[]*ToolCall`).
+  - Tests cover: user text, model function call → part, tool result → user function part, mixed parts, text-only response, function-call response, empty candidates, nil response, mixed text+call.
+- TDD: RED — build failed (helpers undefined); GREEN after `convert.go`.
+- Verify: `go test ./internal/llm/...` → PASS (note: test names don't match the plan's `-run Convert` prefix, so the full package run was used)
+- Notes: `gofmt -w` applied at Step 6.
+
+## Step 5: Gemini adapter + tests
+- Files: `internal/llm/gemini.go`, `internal/llm/gemini_test.go`
+- Agent: /dev (TDD)
+- Changes:
+  - `modelsClient` seam matching `*genai.Models.GenerateContent` signature; `Gemini{model, timeout, generator, declByTool}`; `New(client *genai.Client, model, timeout, decls)` sets `generator: client.Models`.
+  - `Generate`: builds `[]*genai.Content`, `&genai.GenerateContentConfig{Tools: [...]}` for named tools only, runs under `context.WithTimeout(ctx, timeout)`; maps `DeadlineExceeded` → `ErrTimeout`, passes `Canceled` through, wraps other provider failures → `ErrProvider`.
+  - Tests inject a fake `modelsClient` (no network/credentials): text-only, tool-call, timeout→ErrTimeout, cancel pass-through, provider error, tool-config assembly for named tools, no-tools when none named, contents built.
+- TDD: RED — build failed (`Gemini` undefined); GREEN after `gemini.go`.
+- Verify: `go test ./internal/llm/...` → PASS
+- Notes: initial impl returned all declarations when `ToolNames` was empty; test exposed it, fixed to "tools for named tools" (plan Step 5) → GREEN.
+
+## Step 6: Wiring & repo-wide verification
+- Files: none new (unused-adapter check only; FEAT-00006 wires internal/agent)
+- Agent: /dev
+- Changes:
+  - `gofmt -w internal/llm` → `gofmt -l` clean; only `internal/llm/*` added, no edits to config/policy/mcpclient/cmd/server.
+- Verify:
+  - `gofmt -l internal/llm` → PASS (empty)
+  - `go build ./...` → PASS
+  - `go vet ./...` → PASS
+  - `go test ./internal/llm/...` → PASS
