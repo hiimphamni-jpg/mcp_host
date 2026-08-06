@@ -1,54 +1,38 @@
-# 🚀 Execution Log — FEAT-00001
+# Build Execution Log — FEAT-00002
 
-## Task: Setup Go project & Transport Layer
-- **Status**: IN_PROGRESS
-- **Step 1**: `go mod init` -> ✅ Done
-- **Step 2**: Install dependencies (`mcp-go`, `gemini-sdk`) -> ✅ Done
-- **Step 3**: Create directory structure (`cmd`, `internal`, `pkg`) -> ✅ Done
-- **Step 4**: Write `main.go` boilerplate -> ✅ Done
-- **Step 5**: Verify setup with `go run` -> ✅ Done
+Mode: SEQUENTIAL
 
-### Verification Result
-```text
-MCP Host (Go) starting...
-Project structure initialized successfully.
-Warning: GEMINI_API_KEY is not set
-```
-
-## Step 1: Align the dependency baseline
-- Files: `go.mod`, `go.sum`
+## Step 1: Implement `internal/config` load and validation
+- Files: `internal/config/config.go`, `internal/config/config_test.go`
 - Changes:
-  - Attempted to add `google.golang.org/genai v1.66.0` as the approved direct SDK dependency.
-  - Ran the plan's required module cleanup and module-graph inspection.
-- Verify: `go get google.golang.org/genai@latest; go mod tidy; go list -m all` -> FAIL
-- Notes: `go mod tidy` pruned the SDK because no source imports it, which is required by this step's prohibition on provider behavior. The plan cannot both retain an unused direct dependency and finish with `go mod tidy`; no subsequent steps were executed.
+  - Added `Config` struct with all §4 fields; `Load` reads env (best-effort `.env` via godotenv) and parses JSON args, durations, and ints with aggregated field errors.
+  - `Validate` returns aggregated errors for missing required fields and non-positive/bound values, never echoing the API secret.
+  - Tests cover valid, missing-required, malformed-JSON, bad-duration, zero/negative, bad-int, and secret-not-leaked.
+- Verify: `go test ./internal/config -run TestConfig` → PASS; `go vet ./internal/config` → PASS
+- Notes: (red) helper name `validConfig`→`validEnv`; tuning `SecretNotLeaked` test to force a validation error while keeping the secret assertion.
 
-## Step 1: Align the dependency baseline (retry)
-- Files changed: `go.mod`, `go.sum`
+## Step 2: Implement `internal/policy` process allowlist and root containment
+- Files: `internal/policy/policy.go`, `internal/policy/policy_test.go`
 - Changes:
-  - Added `google.golang.org/genai v1.66.0` as the approved direct SDK baseline.
-  - Deferred `go mod tidy` as specified by the revised plan because no bootstrap package imports provider behavior.
-- Verify: `go get google.golang.org/genai@latest; go list -m google.golang.org/genai` -> PASS (`google.golang.org/genai v1.66.0`)
+  - `FilesystemPolicy` validates the configured executable (bare name, no path separators/shell metacharacters), canonicalizes allowed roots via `filepath.Abs`+`EvalSymlinks`, and provides a `Contains` containment check denying paths outside canonical roots.
+  - `ParseArgs` enforces the JSON array-of-strings contract; child argv stays fixed and never LLM-supplied.
+  - Tests cover valid/unsafe/empty command, canonical roots, inside/outside/parent-traversal containment, and JSON arg parsing.
+- Verify: `go test ./internal/policy -run TestPolicy` → PASS; `go vet ./internal/policy` → PASS
+- Notes: (red) test helper cleanup (removed unused `strings`, direct `os.WriteFile`).
 
-## Step 2: Specify safe bootstrap behavior with a failing test
-- Files changed: `cmd/server/main_test.go`
+## Step 3: Wire fail-fast validation into `cmd/server` composition
+- Files: `cmd/server/main.go`, `cmd/server/main_test.go`
 - Changes:
-  - Added a test that sets a representative credential and asserts the exact safe bootstrap output.
-  - The initial red run failed only because `run` was undefined, establishing that the test exercised the missing behavior.
-- Verify: `go test ./cmd/server -run TestRun` -> RED as expected (`undefined: run`)
+  - `run` now calls `config.Load()` first and returns a user-safe diagnostic on invalid config; `main` maps any error to a non-zero exit.
+  - No MCP spawn/initialize code was added (scope stays in FEAT-00003).
+  - Bootstrap test updated to a full valid env; new tests assert invalid config errors, no bootstrap output on failure, and no secret leakage in error/output.
+- Verify: `go test ./cmd/server` → PASS; `go vet ./cmd/server` → PASS; `go run ./cmd/server` → `invalid configuration: ...` + `exit status 1` (PASS)
+- Notes: none.
 
-## Step 3: Replace the placeholder composition root
-- Files changed: `cmd/server/main.go`
+## Step 4: Format and run repository quality gates
+- Files: `internal/config/*.go`, `internal/policy/*.go`, `cmd/server/*.go`
 - Changes:
-  - Removed dotenv loading, MCP client placeholders, credential detection, and misleading readiness output.
-  - Added the testable `run(io.Writer)` bootstrap boundary and a non-zero exit on output failure.
-- Verify: `go test ./cmd/server -run TestRun` -> PASS; `go run ./cmd/server` -> PASS (`MCP Host bootstrap complete. Integrations are not configured or started.`)
-
-## Step 4: Format and verify the repository baseline
-- Files changed: `cmd/server/main.go`, `cmd/server/main_test.go`
-- Changes:
-  - Formatted the bootstrap implementation and its test.
-  - Ran the repository test and static-analysis gates.
-- Verify: `gofmt -w cmd/server/main.go cmd/server/main_test.go` -> PASS; `go test ./...` -> PASS; `go vet ./...` -> PASS
-- Notes: self-review promoted the intentionally unused SDK to a direct requirement and added a user-safe stderr diagnostic for a bootstrap-output failure; the final quality gates are rerun below.
-- Final verify: `gofmt -w cmd/server/main.go cmd/server/main_test.go; go list -m google.golang.org/genai; go test ./...; go vet ./...` -> PASS (`google.golang.org/genai v1.66.0`; all tests and vet passed)
+  - `gofmt -w` on all six touched Go files.
+  - `go mod tidy` removed the not-yet-imported `mcp-go`/`genai` pins reserved for FEAT-00003/00004; reverted `go.mod`/`go.sum` since this task added no new imports (only the already-pinned `godotenv` is used).
+- Verify: `gofmt -w <files>` → OK; `go test ./...` → PASS; `go vet ./...` → PASS
+- Notes: deviation — skipped `go mod tidy` retention to keep future-feature dependency pins intact.
