@@ -72,3 +72,56 @@
 **Full suite:** `go test ./...` all PASS. Coverage `internal/mcpclient` = **86.4%** (≥ 80% per TDD §11).
 
 **Result:** TEST-00020 through TEST-00027 all PASS (8 scenarios). No defects found.
+
+---
+
+## FEAT-00004 - MCP JSON Schema → Gemini Function-Declaration Mapper
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit (`go test ./internal/mapping -v -count=1`, 28 subtests)
+
+| ID | Scenario | Test | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00028 | Full supported subset lossless | `TestMapTools_FullSupportedSubsetLossless` | PASS | DeepEqual exact match (string/integer/number/boolean/array/items/enum[]any+[]string/nested+root required) |
+| TEST-00029 | No-arg tool → empty schema | `TestMapTools_emptyPropertiesNoArgTool` | PASS | Empty non-nil Parameters.Properties |
+| TEST-00030 | Unsupported type rejected | `TestMapTools_rejectsUnsupportedType` (5 cases) | PASS | `errors.Is` matches; tool+field in msg |
+| TEST-00031 | Nested unsupported carries full path | `TestMapTools_rejectsNestedUnsupportedWithPath` | PASS | `config.inner.x` present |
+| TEST-00032 | Malformed schema rejected | `TestMapTools_rejectsMalformedPropertySchema` (6 cases) | PASS | Tool name present |
+| TEST-00033 | Non-string enum member rejected | `TestMapTools_rejectsNonStringEnumMember` | PASS | Tool + field path |
+| TEST-00034 | Duplicate tool names rejected | `TestMapTools_rejectsDuplicateToolNames` | PASS | `ErrDuplicateName` |
+| TEST-00035 | Cyclic schema guarded | `TestMapTools_recursionGuardOnCyclicSchema` | PASS | No stack overflow |
+| TEST-00036 | Over-deep nesting guarded | `TestMapTools_recursionGuardDeepNesting` | PASS | Error at depth limit |
+
+**Full suite:** `go test ./...` all PASS. Coverage `internal/mapping` = **83.1%** (≥ 80% per TDD §11).
+
+**Result:** TEST-00028 through TEST-00036 all PASS (9 scenarios). No defects found.
+
+---
+
+## FEAT-00005 - Gemini Provider Adapter and Conversation Mapping
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit (`go test ./internal/llm -v -count=1`, 20 tests)
+
+| ID | Scenario | Test | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00037 | User text → genai content | `TestToGemContentUserText` | PASS | Role user + text part |
+| TEST-00038 | Model tool call → FunctionCall part | `TestToGemContentModelFunctionCall`, `TestToolCallToPart` | PASS | Name + args preserved |
+| TEST-00039 | User tool result → FunctionResponse | `TestToGemContentUserToolResult`, `TestToolResultToPart` | PASS | Name + response preserved |
+| TEST-00040 | Mixed parts preserved in order | `TestToGemContentMixedParts` | PASS | text + FunctionCall + FunctionResponse |
+| TEST-00041 | Response text extracted | `TestResponseToResponseText` | PASS | Text populated, no ToolCalls |
+| TEST-00042 | Function calls surfaced as ToolCalls | `TestResponseToResponseFunctionCall`, `TestResponseToResponseMixed` | PASS | Name + args extracted |
+| TEST-00043 | Nil/empty response handled | `TestResponseToResponseEmptyCandidates`, `TestResponseToResponseNil` | PASS | Empty Response, no panic |
+| TEST-00044 | Generate happy path (text) | `TestGenerateTextOnly` | PASS | Text returned |
+| TEST-00045 | Generate surfaces function calls | `TestGenerateToolCall` | PASS | ToolCalls populated |
+| TEST-00046 | Deadline → ErrTimeout | `TestGenerateTimeoutMapsToErrTimeout` | PASS | `errors.Is(ErrTimeout)`; no leak |
+| TEST-00047 | Caller cancel passes through | `TestGenerateContextCancelPassesThrough` | PASS | NOT ErrTimeout |
+| TEST-00048 | Provider error → ErrProvider | `TestGenerateProviderError` | PASS | `errors.Is(ErrProvider)`; user-safe |
+| TEST-00049 | Tool config for named tools only | `TestGenerateBuildsToolConfigForNamedTools`, `TestGenerateNoToolsWhenNoneNamed` | PASS | Order preserved; empty → no tools |
+| TEST-00050 | Contents built for request | `TestGenerateBuildsContents` | PASS | 2 contents in order |
+
+**Full suite:** `go test ./...` all PASS. Coverage `internal/llm` = **90.4%** (≥ 80% per TDD §11).
+
+**Result:** TEST-00037 through TEST-00050 all PASS (14 scenarios). No defects found.
