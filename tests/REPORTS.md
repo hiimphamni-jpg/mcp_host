@@ -49,3 +49,26 @@
 - **Full suite:** `go test ./...` all PASS.
 
 **Result:** TEST-00004 through TEST-00019 all PASS. No defects found.
+
+---
+
+## FEAT-00003 - Stdio MCP Client Lifecycle
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit + integration (`go test ./internal/mcpclient -v -count=1`)
+
+| ID | Scenario | Test | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00020 | Happy path — initialize/list/call | `TestStdioClient_HappyPath_InitializeListCall` | PASS | Initialize ok; 1 tool `echo`; call content `ok`, IsError false |
+| TEST-00021 | Constructor rejects nil policy / zero timeout | `TestStdioClient_InvalidPolicyAndTimeoutArg` | PASS | Both return errors |
+| TEST-00022 | Child crash → ErrProcessExit + idempotent Close | `TestStdioClient_Crash_ReturnsTypedErrorAndCloseIsSafe` | PASS | `errors.Is(ErrProcessExit)`; second Close nil |
+| TEST-00023 | Never-responding child → ErrTimeout (200ms) | `TestStdioClient_Timeout_ReturnsErrTimeout` | PASS | `errors.Is(ErrTimeout)`; Close clean |
+| TEST-00024 | Server protocol error → ErrInvalidResponse | `TestStdioServer_InvalidResponse_ReturnsErrInvalidResponse` | PASS | `errors.Is(ErrInvalidResponse)` |
+| TEST-00025 | Close leaves no orphan child | `TestStdioServer_Close_LeavesNoOrphan` | PASS | exit-marker written within 3s |
+| TEST-00026 | Typed errors unwrap to sentinels | `TestError_UnwrapMatchesSentinel` | PASS | All 5 Kinds; never ErrTimeout |
+| TEST-00027 | Error messages user-safe (no path/secret) | `TestError_MessageIsUserSafe`, `TestTimeoutError_IsErrTimeout` | PASS | No `\`, no `secret`/`token`; operation named |
+
+**Full suite:** `go test ./...` all PASS. Coverage `internal/mcpclient` = **86.4%** (≥ 80% per TDD §11).
+
+**Result:** TEST-00020 through TEST-00027 all PASS (8 scenarios). No defects found.
