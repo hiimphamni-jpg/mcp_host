@@ -1,29 +1,40 @@
-# /finish Summary — FEAT-00006: Bounded agentic loop
+# /finish Summary — FEAT-00007: Headless CLI prompt input and final-response output
 
 ## Status
-- DEV: done (quality gates green)
-- TEST: pending (suggest `/test cases FEAT-00006`)
-- QC: pending (suggest `/qc review FEAT-00006`)
-- Registry: `docs/REGISTRY.md` FEAT-00006 → DEV ✅, Status IN PROGRESS
+- DEV: ✅ done (quality gates green)
+- TEST: ✅ passed (TEST-00065..71, 7 scenarios)
+- QC: ✅ approved
+- Registry: `docs/REGISTRY.md` FEAT-00007 → **DONE**
 
 ## What shipped
-- `internal/agent` (new): `Options`, `Agent`, `Run` bounded loop, `ToolCaller` seam, `New` validation, `ErrIterationLimit` + typed `agent.Error`.
-- `internal/agent/schema.go`: stdlib-only neutral schema-arg validator (object/required/enum/array/number kinds), secret-safe messages.
-- `internal/agent/results.go`: `BoundedResult` (JSON + truncation marker), `MessageResult`, `ErrorResult` (non-secret error mapping).
-- `internal/agent/agent_test.go` + helper tests: fake-driven loop coverage incl. cancellation propagation, truncation, no-secret, iteration limit.
-- `cmd/server/main.go`: composition-root wiring (policy → MCP → discovery → mapping → llm.New → agent), `--prompt` flag, `mcpToolCaller` adapter converting mcp-go results to neutral `llm.ToolResult` (ADR-0001 D2), deferred `client.Close()` on all paths (AC4).
-- `cmd/server/main_test.go`: smoke test (unconfigured invocation ends cleanly, no real Gemini/MCP in CI) + adapter/schema unit tests.
-- `docs/REGISTRY.md`: FEAT-00006 DEV → done.
+- `cmd/server/main.go`:
+  - `readPromptFromStdin(r io.Reader) (string, error)` — whole-stream read, whitespace-trimmed; empty stream → `""` (bootstrap path).
+  - `isTerminal(r io.Reader)` — character-device check via `*os.File` type assertion; injected readers/pipes are never terminals, keeping the seam injectable (A1, Windows TTY risk mitigated).
+  - `run` signature changed to `run(out io.Writer, stdin io.Reader, args ...string)`; `main()` passes `os.Stdin`. Empty `--prompt` + non-TTY stdin → read one prompt; non-empty → agent loop, empty → bootstrap (A1/A2).
+  - Final answer printed via `Fprintln(out, answer)` (A3); diagnostics stay on stderr via `main()`'s `fmt.Fprintln(os.Stderr, err)` + `os.Exit(1)`; no tool logs on stdout.
+- `cmd/server/main_test.go`:
+  - New: `readPromptFromStdin` unit tests (trim, empty, read-error), `TestRun_EmptyStdin_Bootstraps`, `TestRun_NonEmptyStdin_TriggersLoop` (deterministic fail-fast MCP spawn, no real Gemini/MCP).
+  - Existing bootstrap/secret/flag tests updated to the new stdin seam — contracts unchanged.
 
 ## Verification evidence
-- `go build ./...` → PASS
+- `go test ./...` → PASS (all 7 packages)
 - `go vet ./...` → PASS
-- `go test ./... -count=1` → PASS (all packages)
 - `gofmt -l .` → empty
-- `internal/agent` coverage: 91.5% (target ≥ 80%)
-- No `genai`/`mcp-go` import in `internal/agent` (comments only).
+- Manual E2E probe: empty piped stdin → `bootstrap complete`, EXIT=0; non-empty piped stdin + unresolvable MCP → EXIT=1, diagnostic on stderr only, empty stdout (A4: no secret/leak, correct exit code).
+
+## Sign-off trail
+- Plan: `artifacts/superpowers/plan.md` (user APPROVED)
+- Execution: `artifacts/superpowers/execution.md`
+- Review/QC: `artifacts/superpowers/review.md` (QC APPROVED, no blockers)
+- Tests: `tests/TEST-00007.md` + `tests/REPORTS.md`
+
+## Review pass (final)
+- 🔴 Blockers: none.
+- 🟠 Majors: none.
+- 🟡 Minors: `isTerminal` treats a `Stat` error as "not a terminal" (reads stdin) — safe default, no hang.
+- ⚪ Nits: git branch is `feature/FEAT-00003-stdio-mcp-client-lifecycle` — FEAT-00007 changes uncommitted in working tree.
 
 ## Follow-ups
-- `/test cases FEAT-00006` — write acceptance-level test cases (TEST column).
-- `/qc audit FEAT-00006` then `/qc sign-off FEAT-00006` — flip Global Status to DONE.
-- FEAT-00007 (headless CLI stdout/exit-code contract) is the next dev dependency; until then `--prompt` is the only loop entry.
+- [SUGGEST] Create `feature/FEAT-00007-headless-cli-prompt-stdin` and commit the working-tree changes before merging (git-workflow §1).
+- [Manual] Full end-to-end validation with a live Filesystem MCP server + real Gemini API key (covered separately by opt-in QA-00003 E2E).
+- Task is **DONE** in Registry; further sprint items: QA-00001..03, DEVOPS-00001, DOC-00001, FEAT-00008/09 (out of scope).

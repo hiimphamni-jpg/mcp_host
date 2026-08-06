@@ -21,18 +21,19 @@ import (
 )
 
 func main() {
-	if err := run(os.Stdout, os.Args[1:]...); err != nil {
+	if err := run(os.Stdout, os.Stdin, os.Args[1:]...); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-// run is the composition root (ADR-0001 D1). Without a --prompt it validates
-// the configuration and prints the bootstrap status; with a --prompt it
-// discovers the MCP tools, maps them once (declarations for the Gemini adapter
-// and neutral schemas for the agent), and runs one bounded agent loop. The
-// MCP child process is closed on every path so no orphan survives (AC4).
-func run(out io.Writer, args ...string) error {
+// run is the composition root (ADR-0001 D1). Without a --prompt it reads one
+// prompt from stdin only when stdin is not a terminal (piped/non-interactive);
+// with a --prompt it discovers the MCP tools, maps them once (declarations for
+// the Gemini adapter and neutral schemas for the agent), and runs one bounded
+// agent loop. The MCP child process is closed on every path so no orphan
+// survives (AC4).
+func run(out io.Writer, stdin io.Reader, args ...string) error {
 	fs := flag.NewFlagSet("mcp-host", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	prompt := fs.String("prompt", "", "run one agent loop with the given prompt")
@@ -45,10 +46,45 @@ func run(out io.Writer, args ...string) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	if *prompt == "" {
+	p := *prompt
+	if p == "" && !isTerminal(stdin) {
+		line, err := readPromptFromStdin(stdin)
+		if err != nil {
+			return fmt.Errorf("read prompt from stdin: %w", err)
+		}
+		p = line
+	}
+
+	if p == "" {
 		return writeBootstrap(out)
 	}
-	return runAgentLoop(context.Background(), out, cfg, *prompt)
+	return runAgentLoop(context.Background(), out, cfg, p)
+}
+
+// readPromptFromStdin reads the whole stdin as a single prompt, trimmed of
+// surrounding whitespace. An empty stream yields an empty string, which the
+// caller treats as "no prompt" (bootstrap path).
+func readPromptFromStdin(r io.Reader) (string, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// isTerminal reports whether r is an interactive terminal (character device).
+// Non-*os.File readers (injected buffers, pipes) are never terminals, so the
+// stdin fallback stays testable without a real TTY.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return stat.Mode()&os.ModeCharDevice != 0
 }
 
 func writeBootstrap(out io.Writer) error {

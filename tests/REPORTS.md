@@ -159,3 +159,25 @@
 **Full suite:** `go test ./...` all PASS. Coverage `internal/agent` = **91.5%** (≥ 80% per TDD §11).
 
 **Result:** TEST-00051 through TEST-00064 all PASS (16 scenarios). No defects found.
+
+---
+
+## FEAT-00007 - Headless CLI Prompt Input and Final-Response Output
+
+**Executed:** 2026-08-06 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Unit + CLI (`go test ./cmd/server -v -count=1` + built binary probe)
+
+| ID | Scenario | Test / Probe | Status | Evidence |
+|---|---|---|---|---|
+| TEST-00065 | Non-empty piped stdin triggers the loop path (AC2) | `TestRun_NonEmptyStdin_TriggersLoop` | PASS | `start MCP client: ...` error proves loop path; no bootstrap on stdout |
+| TEST-00066 | Empty stdin → bootstrap, exit 0 (AC3) | `TestRun_EmptyStdin_Bootstraps` + binary probe `"" \| mcp-host.exe` | PASS | Exact bootstrap line; exit=0 |
+| TEST-00067 | `--prompt` path unchanged (AC1) | Existing dispatch + build | PASS | Flag path unchanged |
+| TEST-00068 | Prompt trimmed of whitespace (boundary) | `TestReadPromptFromStdin_NonEmpty_ReturnsTrimmedPrompt` | PASS | `"  list files\n"` → `"list files"` |
+| TEST-00069 | Stdin read error surfaced (AC4) | `TestReadPromptFromStdin_ReadError_IsSurfaced` | PASS | Non-nil error, no silent fallback |
+| TEST-00070 | Failure → stderr + exit non-zero, no leak (AC4) | Binary probe `"list files" \| mcp-host.exe` | PASS | exit=1; `start MCP client:` on stderr; no secret |
+| TEST-00071 | Regression - existing bootstrap/secret/flag tests | `TestRun_WritesSafeBootstrapStatus`, `TestRun_SmokeUnconfiguredInvocationEndsCleanly`, `TestRun_InvalidConfigDoesNotLeakSecret`, `TestRun_FlagParseErrorReturnsCleanError` | PASS | All unchanged and green |
+
+**Full suite:** `go test ./... -count=1` all PASS (7 packages). Coverage `cmd/server` = **53.6%**.
+
+**Result:** TEST-00065 through TEST-00071 all PASS (7 scenarios). No defects found.
