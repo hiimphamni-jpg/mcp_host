@@ -69,7 +69,117 @@ The host enforces the following per prompt:
 
 ## 7. Out of Scope for MVP
 
-- HTTP API, SSE streaming, Next.js UI, and authentication for remote callers.
+- HTTP API, SSE streaming, Next.js UI, and authentication for remote callers. *(Superseded for the gateway surface by §8–§10 of FEAT-00008; the below out-of-scope items remain.)*
 - Multiple concurrent MCP servers.
 - PostgreSQL, Git/SVN, Docker/CLI, and remote HTTP/SSE MCP transports.
 - DeepSeek and Ollama providers.
+
+---
+
+## 8. Gateway User Stories (FEAT-00008)
+
+> Scope: authenticated HTTP surface over the existing bounded agent loop. The CLI
+> entrypoint and `internal/agent` behavior are unchanged (`ADR-00001`).
+
+- **As a programmatic client,** I want to `POST /v1/chat` with a Bearer token and
+  a prompt, so that I can drive the agent remotely.
+- **As a programmatic client,** I want to receive a typed, ordered SSE sequence
+  (`start → stream* → final`), so that I can render progress and a final answer.
+- **As a browser UI (future Next.js),** I want the streamed contract to be frozen,
+  so that a UI built later depends on a stable SSE interface.
+- **As an operator,** I want the gateway authenticated and concurrency-capped, so
+  that an unauthorized or excessive caller cannot consume LLM/MCP resources.
+- **As an operator,** I want `GET /healthz` to be unauthenticated, so that
+  load-balancer liveness probes work.
+- **As a user,** I want my request cancelled cleanly on disconnect, so that no
+  orphaned MCP child process is left behind.
+
+## 9. Gateway Business Rules (FEAT-00008)
+
+### 9.1 Authentication (ADR-00004)
+
+- `R1`: `POST /v1/chat` REQUIRES `Authorization: Bearer <token>`.
+- `R2`: Accepted tokens come ONLY from environment (`GATEWAY_API_TOKEN`, plus
+  optional `GATEWAY_API_TOKENS` for rotation). Tokens are never in code, logs,
+  or responses.
+- `R3`: Token comparison is constant-time (`crypto/subtle`) against every
+  configured token; any mismatch → `401`.
+- `R4`: `GET /healthz` is unauthenticated.
+- `R5`: A `request_id` is assigned before auth for correlation; used in `id:`,
+  error `trace_id`, and logs.
+
+### 9.2 Concurrency Guard (TDD §2.5, §4)
+
+- `R6`: `POST /v1/chat` admits at most `GATEWAY_MAX_CONCURRENT` in-flight
+  requests (default `8`); requests beyond the cap get `429` before any SSE.
+- `R7`: The guard limits concurrent child MCP processes to protect the OS from
+  exhaustion.
+
+### 9.3 Per-request MCP lifecycle (ADR-00005)
+
+- `R8`: Each `POST /v1/chat` spawns ONE stdio MCP server; no pooling, no
+  cross-request reuse, no in-flight sharing.
+- `R9`: The full lifecycle (spawn → Initialize within `MCP_TIMEOUT` → ListTools
+  once → map schemas → agent loop → Close) runs inside the request context.
+- `R10`: The MCP client is ALWAYS closed — on success, failure, OR cancellation
+  (`defer client.Close()` on every path).
+
+### 9.4 Cancellation semantics (ADR-00005, TDD AC4)
+
+- `R11`: Request context propagates cancellation; a client disconnect stops the
+  agent and closes the MCP child.
+- `R12`: On cancel, if the socket is still writable, emit best-effort
+  `event:error {"code":"CANCELLED",...}` then close.
+
+### 9.5 Message streaming & event mapping (ADR-00003, ADR-00006)
+
+- `R13`: Agent emits `start` once, then per iteration `text` (if non-empty) and
+  `tool` before/after each sequential tool call, then `final` on success.
+- `R14`: `internal/server` maps `agent.Event` → SSE frames on the fly via the
+  optional `OnEvent` observer; the agent loop itself is NOT re-implemented.
+- `R15`: Terminal state is deterministic: exactly one of `final` or `error`
+  per stream, after which the stream closes.
+- `R16`: `stream` tool events carry `name` + `status` (`start`/`result`) +
+  bounded `bytes`; they do NOT echo tool result text (avoids leaking secrets).
+- `R17`: `OnEvent` runs with best-effort `recover()`; a panicking observer must
+  not abort the agent loop.
+
+### 9.6 Validation (error-handling, api-convention)
+
+- `R18`: Auth + body validation ALWAYS complete before any SSE. Failures return
+  a JSON error envelope with `error.code` + `error.message` and the HTTP status
+  (`401`/`400`/`422`/`429`).
+- `R19`: Empty or whitespace `prompt` → `422`; malformed JSON → `400`.
+- `R20`: Post-`start` failures use the in-stream `error` event with a
+  machine code (`BAD_GATEWAY`/`LLM_FAILURE`/`MCP_ERROR`/`ITERATION_LIMIT`/
+  `CANCELLED`) and a safe, non-secret `message`.
+
+### 9.7 CLI invariance
+
+- `R21`: `cmd/server` passes no `OnEvent`; `internal/agent` `Run` signature and
+  CLI behavior are byte-for-byte unchanged — all pre-existing tests stay green.
+
+## 10. Gateway Acceptance Criteria — FEAT-00008 (GW1..GW9)
+
+| ID | Criterion |
+|----|-----------|
+| GW1 | Valid token → `text/event-stream` starting with `start` and ending with `final` containing the CLI-equivalent answer. |
+| GW2 | Missing/invalid token → `401` JSON, no SSE frames emitted. |
+| GW3 | Malformed body → `400`; empty `prompt` → `422`; neither emits SSE. |
+| GW4 | Tool progress appears as ordered `stream` events before `final`. |
+| GW5 | Client disconnect cancels the agent and closes the MCP child (no orphan). |
+| GW6 | MCP init/discover/call failure after `start` → `error` event; process stays up for the next request. |
+| GW7 | `cmd/server` CLI behavior unchanged (existing test suite green). |
+| GW8 | HTTP-layer tests contain no `mcp-go`/`genai` (SDK-free `Handler` seam). |
+| GW9 | Two concurrent requests run independent MCP lifecycles (per-request isolation). |
+
+## 11. Frontend Scope & Browser Token Caveat (FEAT-00008)
+
+- **Next.js UI is explicitly OUT of scope for FEAT-00008.** The gateway contract
+  (`ADR-00002/03`) must freeze and be tested first.
+- **Token-proxy caveat:** SSE `EventSource` cannot set an `Authorization` header,
+  and embedding the Bearer token in a browser bundle is a security risk
+  (`ADR-00004`). The future UI MUST call the gateway through a server-side
+  Next.js route handler / proxy (BFF) that owns the token and uses
+  `fetch` + `ReadableStream`, never `EventSource` directly from the browser.
+- Tracked as follow-up **FEAT-XXXXX (Next.js UI)** in Sprint 2.

@@ -133,3 +133,56 @@ func TestConfigLoad_BadInt(t *testing.T) {
 		t.Errorf("error should mention MCP_MAX_RESULT_BYTES, got: %v", err)
 	}
 }
+
+func TestConfigLoad_GatewayDefaults(t *testing.T) {
+	validEnv(t)
+
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned an error: %v", err)
+	}
+	if got.GatewayAddr != ":8080" {
+		t.Errorf("default GatewayAddr = %q, want :8080", got.GatewayAddr)
+	}
+	if got.GatewayMaxConcurrent != 8 {
+		t.Errorf("default GatewayMaxConcurrent = %d, want 8", got.GatewayMaxConcurrent)
+	}
+}
+
+func TestConfigLoad_GatewayOverrides(t *testing.T) {
+	validEnv(t)
+	t.Setenv("GATEWAY_ADDR", ":9090")
+	t.Setenv("GATEWAY_API_TOKEN", "primary-token")
+	t.Setenv("GATEWAY_API_TOKENS", "tok-a,tok-b")
+	t.Setenv("GATEWAY_MAX_CONCURRENT", "16")
+
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned an error: %v", err)
+	}
+	if got.GatewayAddr != ":9090" {
+		t.Errorf("GatewayAddr = %q, want :9090", got.GatewayAddr)
+	}
+	if got.GatewayAPIToken != "primary-token" {
+		t.Errorf("GatewayAPIToken = %q", got.GatewayAPIToken)
+	}
+	if len(got.GatewayAPITokens) != 2 || got.GatewayAPITokens[0] != "tok-a" || got.GatewayAPITokens[1] != "tok-b" {
+		t.Errorf("unexpected GatewayAPITokens = %v", got.GatewayAPITokens)
+	}
+	if got.GatewayMaxConcurrent != 16 {
+		t.Errorf("GatewayMaxConcurrent = %d, want 16", got.GatewayMaxConcurrent)
+	}
+}
+
+func TestConfigLoad_BadGatewayConcurrent(t *testing.T) {
+	validEnv(t)
+	t.Setenv("GATEWAY_MAX_CONCURRENT", "zero")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load succeeded but GATEWAY_MAX_CONCURRENT is invalid")
+	}
+	if !strings.Contains(err.Error(), "GATEWAY_MAX_CONCURRENT") {
+		t.Errorf("error should mention GATEWAY_MAX_CONCURRENT, got: %v", err)
+	}
+}

@@ -1,71 +1,101 @@
-# Brainstorm — FEAT-00007: Headless CLI prompt input and final-response output
+# Brainstorm — FEAT-00008: HTTP/SSE API Gateway and Next.js UI
 
-- **Task ID:** FEAT-00007
-- **Phase:** `/think` (Clarify) — Flow 1 "New Feature"
-- **Date:** 2026-08-06
-- **Status:** Draft (open clarifying questions)
-
----
+> Phase: Flow 1 — Clarify (`/think`). Task ID: FEAT-00008. Dependency: dev, test, qc.
+> Registry status on entry: DEFERRED (P2 / S2).
 
 ## Goal
-
-Make the composition root (`cmd/server`) a fully headless CLI:
-
-1. Accept a prompt either via `--prompt` or, when `--prompt` is omitted, read one prompt from **stdin** (per TDD §9).
-2. Emit **only the final model text** to stdout (no tool logs, progress, or diagnostics on stdout).
-3. Route all diagnostics to stderr and exit non-zero on any failure (invalid config, timeout, MCP failure, iteration limit).
-4. Preserve the existing bootstrap status behavior for the case with **no prompt input at all**.
-
-## Current state (from code)
-
-- `cmd/server/main.go:run` already supports `--prompt` and prints the final answer to `out` (`main.go:122`).
-- Missing: **stdin prompt input** when `--prompt` is omitted — currently it prints bootstrap status instead (`main.go:48-49`).
-- Conflicting existing test: `TestRun_WritesSafeBootstrapStatus` and `TestRun_SmokeUnconfiguredInvocationEndsCleanly` expect bootstrap output when no `--prompt` is given.
+Expose the existing headless Go MCP host (Gemini + Filesystem MCP agent loop) to remote
+callers over an HTTP/SSE API Gateway, and provide a minimal Next.js web UI that issues
+prompts and streams the final response. Scope is one MCP server per request (mirrors MVP
+single-server constraint).
 
 ## Constraints
+- **Plan Gate (mandatory):** no implementation code until `/plan` is built and the user
+  replies `APPROVED` (`.gemini/rules/workflow.md §1`).
+- **MVP out-of-scope:** HTTP API, SSE, Next.js UI, and remote-caller auth were explicitly
+  deferred (business-logic.md §7; TDD §1). This feature is their first full activation, so
+  design decisions (auth, SSE semantics, session model) are required before code.
+- **Design before build:** spans ≥2 layers (Go transport adapter + TypeScript/Next.js UI) →
+  TDD from `/architect` and ADR are required first (`.gemini/rules/workflow` + GEMINI.md §7).
+- **Reuse seams / AC5:** must not couple the new gateway to mcp-go or the Gemini SDK.
+  Reuse `llm.LLM`, `agent.ToolCaller`, `mapping`, `policy`, `config` via the existing seams.
+- Architecture/security rules apply fully: `api-convention.md`, `security.md`,
+  `error-handling.md`, `code-style.md` (Go + TS), `database.md` (N/A for MVP scope).
+- Endpoint, authentication, event format, reconnection, and disconnect semantics must be
+  documented before implementation (TDD §9).
 
-- **No code until `/plan` is APPROVED** (rules/workflow.md §1).
-- Respect `rules/api-convention.md`, `rules/code-style.md`, `rules/error-handling.md`, `rules/testing.md`, `rules/security.md`.
-- MVP: single MCP server, Gemini only; HTTP/SSE is out of scope (deferred).
-- Do not leak secrets (API keys, raw prompts) to stdout/stderr (business-logic §4).
-- Preserve the existing bootstrap/test contract or update tests deliberately as part of the plan.
-- Keep `cmd/server | internal/*` dependency direction; the agent loop itself is unchanged (FEAT-00006 done).
-
-## Options
-
-1. **Current only (`--prompt`)** — already implemented; does not meet TDD §9 stdin clause. → Reject.
-2. **Flag + stdin fallback** — use `--prompt` if provided; otherwise read exactly one prompt from stdin; empty stdin still prints bootstrap. → Recommended.
-3. **Stdin always reads** — changes bootstrap semantics, breaks existing tests. → Only if a new "reset/config" subcommand replaces bootstrap; larger scope. → Deferred.
-4. **Add `--stdin`, `--out`, separate output channel flags** — over-engineered for headless MVP. → Reject for this task.
-
-## Recommendation
-
-**Option 2**: keep `--prompt`; add an `io.Reader` (stdin) that supplies the prompt when `--prompt` is empty. Bootstrap status remains the fallback when both are empty (preserves existing tests). Rationale: minimal, testable (inject `bytes.Buffer` as stdin), meets TDD §9, keeps diagnostics/exit-code contract, no new config or layers.
+## Known Context
+- Go module (`mcp-host`), Go 1.26, `mcp-go v0.57.0`, `google.golang.org/genai v1.66.0`.
+- Composition root is `cmd/server/main.go:run` → per-prompt discovery + one agent loop,
+  print final text. Agent (`internal/agent`) depends only on `llm.LLM` + `ToolCaller`
+  (ADR-0001; AC5 preserved).
+- `internal/agent/agent.go` exposes `ToolCaller` (CallTool) and `Options{LLM, Tools,
+  Schemas, MaxIterations, MaxResultBytes}` — a clean seam to run the loop per HTTP request.
+- `internal/llm` is a single `Generate(ctx, *Request)` provider-neutral surface.
+- Config is env-driven (`internal/config`), fail-fast, secrets never printed.
+- Existing features FEAT-00001..00007 done within `internal/` and `cmd/server`; tmp/
+  integration tests live in `internal/mcpclient`.
+- No HTTP/SSE, no Next.js, no auth code exists. No `package.json` at repo root except
+  `.opencode/` tooling.
 
 ## Risks
+- **Remote auth** is the highest-risk area: exposing a filesystem-backed agent over HTTP
+  without robust auth is a remote code-exec/full file-access risk (Rhizome). Auth design
+  must resolve before Go + Next.js code (security.md).
+- **SSE semantics:** one request ↔ one stream; connection lifecycle, reconnection, and
+  disconnect behavior must be specified or UX/backpressure bugs and orphaned MCP child
+  processes appear (safety.md).
+- **Concurrency:** MVP runs one MCP server per invocation; the HTTP gateway must bound
+  concurrent prompts / per-request MCP process lifetime and enforce timeouts.
+- **Result size:** unbounded SSE frames risk DoS; must retain `MCP_MAX_RESULT_BYTES` cap.
+- **Next.js scope creep:** a full chat UI is large; keep UI thin (a single prompt →
+  streamed response view) to stay shippable; enrich later.
+- **MCP server spawn per request** cost/latency (SSE may be long-lived): scope/lifetime
+  policy to be decided by `/architect`.
+- Cross-origin / CORS, secrets in UI config, and streaming-cancel propagation.
 
-- **Behavioral ambiguity** between "no prompt" (bootstrap) and "empty stdin" — must be defined in AC and tests.
-- **Secret leak** if a raw prompt or answer is echoed to stderr on error — guard in tests.
-- **Blocking stdin** — if stdin is read unconditionally it could hang in interactive runs; mitigate by only reading stdin when `--prompt == ""` and documenting headless usage.
-- **Trailing newline/whitespace** in final answer affects exact stdout assertions — tests must tolerate formatting.
-- Existing bootstrap tests may need to remain valid; scope of change to `main.go` only.
+## Options
+- **A — Read-only MVP (recommended first increment):** HTTP POST JSON endpoint
+  `/v1/chat` returning SSE events for streaming final text + tool progress; no interactive
+  tool-result surfacing; thin static Next.js page posting a prompt and rendering the
+  stream server-side. Smallest safe path; auth = bearer API key.
+- **B — Full interactive gateway:** bidirectional per-request session, tool-call/result
+  streamed to UI, manual approval for tool calls, full Next.js chat app with SSR. Richer
+  UX but far larger surface, more SSE contracts and more auth surface.
+- **C — Single unified MCP remote transport:** use mcp-go's HTTP transport as the gateway
+  (expose host itself to an MCP client) + Next.js as a thin MCP client. Least new code but
+  couples harder to mcp-go semantics and complicates auth/stream shaping.
+- **D — Do nothing / defer:** keep DEFERRED. Avoids risk; no remote capability.
 
-## Open clarifying questions (essential only)
+## Recommendation
+**A — Gateway + SSE streaming MVP**, with bearer-token auth, JSON API contract, streaming
+SSE events (start / stream / tool / final / error), one MCP server per request bounded by
+`AGENT_MAX_ITERATIONS` + `MCP_MAX_RESULT_BYTES`, reuse of `cmd/server` engine via a new
+`internal/server` HTTP adapter + `cmd/serverapi`, and a minimal Next.js page. This respects
+the existing seams (AC5), keeps the UI thin, and defers interactive chat-auth/back-pressure
+until an explicit follow-up feature. **Auth precedes code** — API-key bearer in an
+authorize-by token check in the adapter, no LLM-supplied credentials.
 
-1. When `--prompt` is omitted, should stdin be read **always**, or **only when stdin is not a TTY** (piped) to avoid interactive hangs?
-2. Should an **empty stdin** (EOF with no bytes) return the bootstrap status, or be treated as an **error** (non-zero exit)?
-3. Is exact stdout formatting (e.g., strip trailing newline) required, or is `Fprintln(answer)` acceptable?
+## Acceptance Criteria
+- **AC1:** Authenticated HTTP endpoint accepts a JSON prompt and returns a valid SSE stream
+  (`application/event-stream`) with final text; unauthorized request → 401 envelope.
+- **AC2:** Streaming events preserve the bounded loop: emits at least a final-result event
+  and, on failure / iteration-limit, a typed error event with a non-2xx or safe payload
+  (no secrets, no stack traces).
+- **AC3:** Per-request agent works with the existing `internal/agent` and does not need to
+  modify engine seams; fake LLM + fake ToolCaller drive a full end-to-end HTTP test without
+  subsidiary SDKs (AC5 preserved).
+- **AC4:** Trailing shutdown — a client disconnect closes the MCP process; concurrent
+  configurable caller limit enforced; result payload capped.
+- **AC5:** Thin Next.js UI posts one prompt and renders the SSE-composed final answer only.
 
-## Acceptance Criteria (draft)
+## Exit condition (Clarify)
+Goal, constraints, risks, recommendation, and acceptance criteria recorded above.
+**Architecture design IS required** (≥2 layers + new transport/auth surface).
 
-- **AC1:** `mcp-host --prompt "X"` runs the agent loop and writes only the final text to stdout.
-- **AC2:** `mcp-host` (no `--prompt`) reads one prompt from stdin; when non-empty it runs the loop and writes only the final text to stdout.
-- **AC3:** when neither `--prompt` nor non-empty stdin is present, the CLI prints the bootstrap status and exits 0 (existing behavior preserved).
-- **AC4:** on any failure (invalid config, MCP/LLM timeout, iteration limit) the CLI writes a concise diagnostic to stderr and exits non-zero, never leaking secrets.
-- **AC5:** tests in `cmd/server` cover stdin-prompt, `--prompt`, empty-input bootstrap, and error-to-stderr paths.
-
----
-
-## Next gate
-
-> **Architecture design required?** — **No full `/architect` TDD needed** (not ≥3 tables / ≥2 layers; single-file CLI change). A short `/architect review` may optionally confirm the stdin reading seam. The immediate next step is `/pm registry` (confirm 5-digit ID + DoR) then `/plan FEAT-00007`.
+## Next commands
+1. `/architect design FEAT-00008` — TDD + ADR for HTTP/SSE transport, auth, SSE contract,
+   MCP-per-request lifetime, and the gateway/UI boundary.
+2. `/ba spec` + `/ba ac FEAT-00008` — API contract (api-convention.md) + SSE event schema.
+3. `/pm registry` + `/pm dor FEAT-00008` — confirm/assign dependencies, priorities.
+4. `/plan FEAT-00008` → wait for **APPROVED** before any code.

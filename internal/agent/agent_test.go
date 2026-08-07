@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -140,7 +141,40 @@ func TestClassifyGenerateError(t *testing.T) {
 	}
 }
 
-func TestClassifyGenerateError_nilIsSafe(t *testing.T) {
+// TestRun_onEventOrdering proves GW4's real emission order: the agent itself
+// must emit start, then per-iteration text/tool observers, and finally exactly
+// one terminal event. This closes the gap between the HTTP-layer fake Event
+// test (server) and the actual agent pipeline.
+func TestRun_onEventOrdering(t *testing.T) {
+	l := &stubLLM{resps: []*llm.Response{
+		{ToolCalls: []*llm.ToolCall{{Name: "read_file", Arguments: map[string]any{"path": "a"}}}, Text: "thinking..."},
+		{Text: "done"},
+	}}
+	m := &stubMCP{results: map[string]*llm.ToolResult{
+		"read_file": {Name: "read_file", Response: map[string]any{"content": "x"}},
+	}}
+	var types []EventType
+	a, err := New(Options{
+		LLM:            l,
+		Tools:          m,
+		Schemas:        simpleSchemas(),
+		MaxIterations:  5,
+		MaxResultBytes: 64,
+		OnEvent: func(e Event) { types = append(types, e.Type) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := a.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []EventType{EventStart, EventText, EventTool, EventTool, EventFinal}
+	if !reflect.DeepEqual(types, want) {
+		t.Errorf("observed event order = %v, want %v", types, want)
+	}
+}
+
+func TestClassify_Classification_nilIsSafe(t *testing.T) {
 	if err := classifyGenerateError(nil); err != nil {
 		t.Errorf("classifyGenerateError(nil) = %v, want nil", err)
 	}
