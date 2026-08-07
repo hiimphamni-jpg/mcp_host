@@ -181,3 +181,71 @@
 **Full suite:** `go test ./... -count=1` all PASS (7 packages). Coverage `cmd/server` = **53.6%**.
 
 **Result:** TEST-00065 through TEST-00071 all PASS (7 scenarios). No defects found.
+
+---
+
+## FEAT-00008 Gateway Verification (TEST-00009)
+
+**Executed:** 2026-08-07 | **By:** Tester | **Environment:** Local Go toolchain (go1.26.5 windows/amd64)
+
+### Acceptance criteria GW1..GW9
+
+| GW | Criterion | Status | Evidence | Notes |
+|---|---|---|---|---|
+| GW1 | Valid token → SSE `start`…`final` with CLI-equivalent answer | ✅ PASS | `TestChatAuthOK` (`server_test.go`) | 200 + `text/event-stream`; first event `start`, last `final` = `"the answer"`. Final text originates from the `Handler` seam = same agent output the CLI would produce (GW7). |
+| GW2 | Missing/invalid token → 401 JSON, no SSE | ✅ PASS | `TestChatUnauthorized` + live curl | Live: no token → 401. No SSE frame emitted. |
+| GW3 | Malformed body → 400; empty prompt → 422; no SSE | ✅ PASS | `TestChatBadRequest`, `TestChatEmptyPrompt` + live curl | Live `{not-json`→400, `{"prompt":"   "}`→422. See discrepancy note below. |
+| GW4 | Tool progress interleaved as `stream` before `final` | ✅ PASS | `TestChatStreamsToolThenFinal` + `TestRun_emitsToolEventsThenFinal` (agent) | HTTP layer maps events→stream; agent seam emits `start,tool(start),tool(result),...,final` in order. |
+| GW5 | Client disconnect cancels agent + closes MCP child (no orphan) | ✅ PASS | `TestChatClientDisconnectCancelsHandlerAndStreamsCancelled` + `mcpclient` orphan test + runner `defer Close` | Disconnect cancels handler ctx (polled ≤2s for async propagation); child-close via runner `defer client.Close()` + `TestStdioServer_Close_LeavesNoOrphan`. |
+| GW6 | Post-`start` MCP failure → `error`; process recovers | ✅ PASS | `TestChatHandlerErrorIsStreamed` + `TestChatSurvivesAfterStreamedError` | Req1 → `error`; req2 same server → 200 `final`. MCP typed failures in mcpclient suite. |
+| GW7 | `cmd/server` CLI behavior unchanged | ✅ PASS | `go test ./...` (all 10 pkgs ok) | Full suite green after Phase 1 observer seam. |
+| GW8 | HTTP-layer tests SDK-free (`internal/server` no mcp-go/genai) | ✅ PASS | source grep of `internal/server` tests | Imports stdlib only. |
+| GW9 | Concurrent requests independent MCP lifecycles | ✅ PASS | `TestChatConcurrentRequestsIndependentLifecycle` | 4 concurrent requests isolated; `maxActive≥2` proves overlap. |
+
+### New tests added (gap closure)
+
+| Test | Package | Covers |
+|---|---|---|
+| `TestRun_emitsToolEventsThenFinal` | internal/agent | GW4 real emission seam order |
+| `TestRun_observerPanicRecovered` | internal/agent | ADR-00006 observer panic safety |
+| `TestChatClientDisconnectCancelsHandlerAndStreamsCancelled` | internal/server | GW5 disconnect→cancel propagation |
+| `TestChatSurvivesAfterStreamedError` | internal/server | GW6 process survives post-`start` error |
+| `TestChatConcurrentRequestsIndependentLifecycle` | internal/server | GW9 concurrent independent lifecycles |
+
+### Verdict
+
+- `go test ./... -count=1` → PASS (10 packages `ok`).
+- `go vet ./...` → clean.
+- Live gateway (built `./cmd/gateway`, `:8080`): `/healthz` 200 `{"status":"ok"}`; `/v1/chat` no-token 401; `{not-json` 400; `{"prompt":"   "}` 422.
+
+**GW4/GW5/GW6/GW9 now fully automated.** **Result:** GW1–GW9 all PASS (9/9), 0 FAIL, 0 PARTIAL.
+
+### Reported observation (no silent fix)
+
+- **GW3 / spec deviation (Low).** `docs/specs/api/gateway.md` distinguishes *missing*
+  `prompt` → `400 VALIDATION_FAILED` vs *empty/whitespace* → `422 INVALID_CONTENT`.
+  **RESOLVED 2026-08-07 (QC/Dev decision):** `server.go` now uses a `*string` prompt, so
+  missing field → `400 VALIDATION_FAILED`, empty/whitespace → `422 INVALID_CONTENT`,
+  malformed → `400 INVALID_FORMAT`. Added `TestChatMissingPromptField`; full
+  `internal/server` test package passes.
+
+---
+
+## QC Sign-off — FEAT-00008 (2026-08-07, QC)
+
+**Audit scope:** `internal/agent` observer seam (ADR-00006), `internal/server` HTTP layer,
+`internal/runner`, `internal/config` GATEWAY_* keys, `cmd/gateway`, `cmd/server` invariance.
+
+| Check | Result |
+|-------|--------|
+| `go build ./...` | ✅ PASS |
+| `go vet ./...` | ✅ PASS (clean) |
+| `go test ./... -count=1` | ✅ PASS (10 packages) |
+| GW1–GW9 acceptance criteria | ✅ 9/9 PASS (TEST-00009) |
+| `cmd/server` CLI unchanged (GW7) | ✅ PASS — bootstrap output identical |
+| HTTP layer SDK-free (GW8) | ✅ PASS — `internal/server` imports stdlib only |
+| Spec deviation GW3 | ✅ FIXED + regression-tested |
+| No Blocker / unaddressed Major | ✅ none found |
+| Secret handling | ✅ no secrets in code, config, logs, or events |
+
+**Decision:** **QC APPROVE.** FEAT-00008 + sub-tasks FEAT-00010..00014 signed off. No blockers remaining.

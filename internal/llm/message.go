@@ -25,9 +25,12 @@ type Message struct {
 }
 
 // ToolCall is a neutral request from the model to execute a named tool.
+// ThoughtSignature carries the provider's opaque thought signature when present
+// so a returned tool call can be replayed faithfully in a later turn.
 type ToolCall struct {
-	Name      string
-	Arguments map[string]any
+	Name             string
+	Arguments        map[string]any
+	ThoughtSignature []byte
 }
 
 // ToolResult is the observed outcome of a tool call, fed back to the model.

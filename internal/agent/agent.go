@@ -8,6 +8,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -38,6 +39,10 @@ type Options struct {
 	MaxIterations int
 	// MaxResultBytes caps the serialized tool result retained in history.
 	MaxResultBytes int
+	// OnEvent is an optional observer for Agent life events (ADR-00006). It is
+	// invoked synchronously on every event; a panic is recovered so a misbehaving
+	// observer can never break the loop. nil means no-op.
+	OnEvent func(Event)
 }
 
 // Agent runs a bounded agentic loop: LLM inference, tool execution, and result
@@ -48,6 +53,7 @@ type Agent struct {
 	schemas        map[string]any
 	maxIterations  int
 	maxResultBytes int
+	onEvent        func(Event)
 }
 
 // New validates Options and returns an Agent.
@@ -70,7 +76,19 @@ func New(opts Options) (*Agent, error) {
 		schemas:        opts.Schemas,
 		maxIterations:  opts.MaxIterations,
 		maxResultBytes: opts.MaxResultBytes,
+		onEvent:        opts.OnEvent,
 	}, nil
+}
+
+// emit forwards an event to the configured observer, recovering from panics so
+// an observer bug can never leak into the loop (ADR-00006).
+func (a *Agent) emit(e Event) {
+	observer := a.onEvent
+	if observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	observer(e)
 }
 
 // Run executes the loop for one prompt and returns the final LLM text. It
@@ -78,6 +96,7 @@ func New(opts Options) (*Agent, error) {
 // LLM timeout/provider failure; a tool-call failure is bounded into history so
 // the loop can continue to explain it (ADR-0001 D3).
 func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
+	a.emit(Event{Type: EventStart})
 	history := []*llm.Message{{Role: llm.RoleUser, Text: prompt}}
 
 	for i := 0; i < a.maxIterations; i++ {
@@ -92,11 +111,15 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 			resp = &llm.Response{}
 		}
 		if resp.Text != "" && len(resp.ToolCalls) == 0 {
+			a.emit(Event{Type: EventFinal, Text: resp.Text})
 			return resp.Text, nil
 		}
 
 		results := make([]*llm.ToolResult, 0, len(resp.ToolCalls))
 		if len(resp.ToolCalls) > 0 {
+			if resp.Text != "" {
+				a.emit(Event{Type: EventText, Text: resp.Text})
+			}
 			history = append(history, &llm.Message{
 				Role:      llm.RoleModel,
 				Text:      resp.Text,
@@ -115,6 +138,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 		}
 		history = append(history, &llm.Message{Role: llm.RoleUser, ToolResults: results})
 	}
+	a.emit(Event{Type: EventFinal, Text: ""})
 	return "", iterationLimitError()
 }
 
@@ -137,6 +161,7 @@ func (a *Agent) execute(ctx context.Context, tc *llm.ToolCall) (*llm.ToolResult,
 	if err := validateArgs(schema, tc.Arguments); err != nil {
 		return MessageResult(tc.Name, "arguments failed validation: "+err.Error()), nil
 	}
+	a.emit(Event{Type: EventTool, ToolName: tc.Name, ToolArgs: tc.Arguments, Phase: ToolPhaseStart})
 	tr, err := a.tools.CallTool(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -144,7 +169,20 @@ func (a *Agent) execute(ctx context.Context, tc *llm.ToolCall) (*llm.ToolResult,
 		}
 		return ErrorResult(tc.Name, err), nil
 	}
+	a.emit(Event{Type: EventTool, ToolName: tc.Name, Phase: ToolPhaseResult, Bytes: resultBytes(tr)})
 	return BoundedResult(tr, a.maxResultBytes), nil
+}
+
+// resultBytes reports the serialized size of a raw tool result for observation.
+func resultBytes(tr *llm.ToolResult) int {
+	if tr == nil {
+		return 0
+	}
+	b, err := json.Marshal(tr.Response)
+	if err != nil {
+		return 0
+	}
+	return len(b)
 }
 
 // classifyGenerateError normalizes an LLM failure. Caller cancellation passes

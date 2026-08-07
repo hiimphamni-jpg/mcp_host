@@ -23,9 +23,21 @@ type Config struct {
 	MaxAgentIterations   int
 	MaxResultBytes       int
 	LogLevel             string
+	GatewayAddr          string
+	GatewayAPIToken      string
+	GatewayAPITokens     []string
+	GatewayMaxConcurrent int
 }
 
-const defaultLogLevel = "info"
+const (
+	defaultLogLevel       = "info"
+	defaultGatewayAddr    = ":8080"
+	defaultGatewayConc    = 8
+	defaultMCPTimeout     = 30 * time.Second
+	defaultLLMTimeout     = 45 * time.Second
+	defaultMaxIterations  = 8
+	defaultMaxResultBytes = 65536
+)
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
@@ -36,9 +48,16 @@ func Load() (*Config, error) {
 		MCPFilesystemCommand: os.Getenv("MCP_FILESYSTEM_COMMAND"),
 		MCPAllowedRoots:      splitList(os.Getenv("MCP_ALLOWED_ROOTS")),
 		LogLevel:             os.Getenv("HOST_LOG_LEVEL"),
+		GatewayAddr:          os.Getenv("GATEWAY_ADDR"),
+		GatewayAPIToken:      os.Getenv("GATEWAY_API_TOKEN"),
+		GatewayAPITokens:     splitList(os.Getenv("GATEWAY_API_TOKENS")),
+		GatewayMaxConcurrent: defaultGatewayConc,
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = defaultLogLevel
+	}
+	if cfg.GatewayAddr == "" {
+		cfg.GatewayAddr = defaultGatewayAddr
 	}
 
 	var errs []error
@@ -82,6 +101,12 @@ func Load() (*Config, error) {
 		errs = append(errs, fmt.Errorf("MCP_MAX_RESULT_BYTES must be an integer: %w", err))
 	}
 
+	if v, err := strconv.Atoi(os.Getenv("GATEWAY_MAX_CONCURRENT")); err == nil {
+		cfg.GatewayMaxConcurrent = v
+	} else if os.Getenv("GATEWAY_MAX_CONCURRENT") != "" {
+		errs = append(errs, fmt.Errorf("GATEWAY_MAX_CONCURRENT must be an integer: %w", err))
+	}
+
 	if err := cfg.Validate(); err != nil {
 		errs = append(errs, err)
 	}
@@ -118,6 +143,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxResultBytes <= 0 {
 		errs = append(errs, errors.New("MCP_MAX_RESULT_BYTES must be positive"))
+	}
+	if c.GatewayMaxConcurrent <= 0 {
+		errs = append(errs, errors.New("GATEWAY_MAX_CONCURRENT must be positive"))
 	}
 
 	return errors.Join(errs...)

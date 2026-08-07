@@ -32,11 +32,15 @@ func toGemContent(msg *Message) *genai.Content {
 }
 
 // toolCallToPart converts a neutral tool call into a genai FunctionCall part.
+// The provider-mandated thought signature is carried back on the part so the
+// replayed FunctionCall part is accepted by the API.
 func toolCallToPart(tc *ToolCall) *genai.Part {
 	if tc == nil {
 		return nil
 	}
-	return genai.NewPartFromFunctionCall(tc.Name, tc.Arguments)
+	p := genai.NewPartFromFunctionCall(tc.Name, tc.Arguments)
+	p.ThoughtSignature = tc.ThoughtSignature
+	return p
 }
 
 // toolResultToPart converts a neutral tool result into a genai FunctionResponse
@@ -56,10 +60,18 @@ func responseToResponse(r *genai.GenerateContentResponse) *Response {
 		return &Response{}
 	}
 	resp := &Response{Text: r.Text()}
-	for _, fc := range r.FunctionCalls() {
+	if len(r.Candidates) == 0 || r.Candidates[0].Content == nil {
+		return resp
+	}
+	for _, part := range r.Candidates[0].Content.Parts {
+		fc := part.FunctionCall
+		if fc == nil {
+			continue
+		}
 		resp.ToolCalls = append(resp.ToolCalls, &ToolCall{
-			Name:      fc.Name,
-			Arguments: fc.Args,
+			Name:             fc.Name,
+			Arguments:        fc.Args,
+			ThoughtSignature: part.ThoughtSignature,
 		})
 	}
 	return resp
