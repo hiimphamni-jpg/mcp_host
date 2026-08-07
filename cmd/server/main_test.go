@@ -28,7 +28,7 @@ func TestRun_WritesSafeBootstrapStatus(t *testing.T) {
 	setValidEnv(t)
 
 	var output bytes.Buffer
-	if err := run(&output); err != nil {
+	if err := run(&output, strings.NewReader("")); err != nil {
 		t.Fatalf("run returned an error: %v", err)
 	}
 
@@ -44,7 +44,7 @@ func TestRun_SmokeUnconfiguredInvocationEndsCleanly(t *testing.T) {
 	setValidEnv(t)
 
 	var output bytes.Buffer
-	if err := run(&output); err != nil {
+	if err := run(&output, strings.NewReader("")); err != nil {
 		t.Fatalf("run returned an error: %v", err)
 	}
 	if !strings.Contains(output.String(), "bootstrap complete") {
@@ -57,7 +57,7 @@ func TestRun_InvalidConfigReturnsError(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "")
 
 	var output bytes.Buffer
-	if err := run(&output); err == nil {
+	if err := run(&output, strings.NewReader("")); err == nil {
 		t.Fatal("run succeeded with invalid configuration")
 	}
 	if strings.Contains(output.String(), "bootstrap complete") {
@@ -71,7 +71,7 @@ func TestRun_InvalidConfigDoesNotLeakSecret(t *testing.T) {
 	t.Setenv("MCP_FILESYSTEM_COMMAND", "")
 
 	var output bytes.Buffer
-	err := run(&output)
+	err := run(&output, strings.NewReader(""))
 	if err == nil {
 		t.Fatal("run succeeded with invalid configuration")
 	}
@@ -83,11 +83,75 @@ func TestRun_InvalidConfigDoesNotLeakSecret(t *testing.T) {
 	}
 }
 
+// errReader fails on the first Read call.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read stdin: boom") }
+
+func TestReadPromptFromStdin_NonEmpty_ReturnsTrimmedPrompt(t *testing.T) {
+	got, err := readPromptFromStdin(strings.NewReader("  list files\n"))
+	if err != nil {
+		t.Fatalf("readPromptFromStdin: %v", err)
+	}
+	if got != "list files" {
+		t.Fatalf("readPromptFromStdin = %q, want %q", got, "list files")
+	}
+}
+
+func TestReadPromptFromStdin_Empty_ReturnsEmptyString(t *testing.T) {
+	got, err := readPromptFromStdin(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("readPromptFromStdin: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("readPromptFromStdin = %q, want empty", got)
+	}
+}
+
+func TestReadPromptFromStdin_ReadError_IsSurfaced(t *testing.T) {
+	_, err := readPromptFromStdin(errReader{})
+	if err == nil {
+		t.Fatal("readPromptFromStdin swallowed the read error")
+	}
+}
+
+func TestRun_EmptyStdin_Bootstraps(t *testing.T) {
+	setValidEnv(t)
+	var output bytes.Buffer
+	if err := run(&output, strings.NewReader("")); err != nil {
+		t.Fatalf("run returned an error: %v", err)
+	}
+	if !strings.Contains(output.String(), "bootstrap complete") {
+		t.Fatalf("run output = %q, want bootstrap status for empty stdin", output.String())
+	}
+}
+
+func TestRun_NonEmptyStdin_TriggersLoop(t *testing.T) {
+	setValidEnv(t)
+	// A piped non-empty stdin must take the agent-loop path, which first spawns the
+	// MCP process first. Point the policy at an unresolvable command so the loop fails
+	// fast and deterministically with an MCP start error proving the loop path was taken without
+	// touching real Gemini/MCP/npx.
+	t.Setenv("MCP_FILESYSTEM_COMMAND", "nonexistent-cmd-does-not-exist")
+
+	var output bytes.Buffer
+	err := run(&output, strings.NewReader("list files"))
+	if err == nil {
+		t.Fatal("run succeeded with a piped prompt but no Gemini/MCP configured")
+	}
+	if !strings.Contains(err.Error(), "start MCP client") {
+		t.Fatalf("run error = %v, want an MCP start failure proving the loop path was taken", err)
+	}
+	if strings.Contains(output.String(), "bootstrap complete") {
+		t.Error("run wrote bootstrap status despite a piped prompt")
+	}
+}
+
 func TestRun_FlagParseErrorReturnsCleanError(t *testing.T) {
 	setValidEnv(t)
 
 	var output bytes.Buffer
-	if err := run(&output, "--unknown-flag"); err == nil {
+	if err := run(&output, strings.NewReader(""), "--unknown-flag"); err == nil {
 		t.Fatal("run succeeded with an unknown flag")
 	}
 }

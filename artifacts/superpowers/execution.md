@@ -243,3 +243,50 @@ Plan summary: Step 1 skeleton+errors; Step 2 neutral schema validator; Step 3 re
 - 🟠 Majors: none.
 - 🟡 Minors: `defer client.Close()` ignores a close error in runAgentLoop — intentional (primary operation error is returned; Close failure after a completed agent loop is not actionable). No orphan risk: Close is still always called.
 - ⚪ Nits: none.
+
+---
+
+# /build Execution Log — FEAT-00007: Headless CLI prompt input and final-response output
+
+Plan: `artifacts/superpowers/plan.md` (approved via `/build` invocation). Steps 1–3 strictly sequential (test-then-implement-then-refactor in the same file); no parallel batches per plan.
+
+## Step 1 (TDD RED): stdin reading helper tests
+- Files: `cmd/server/main_test.go`
+- Agent: /test (TDD red)
+- Changes:
+  - `TestReadPromptFromStdin_NonEmpty_ReturnsTrimmedPrompt`, `TestReadPromptFromStdin_Empty_ReturnsEmptyString`, `TestReadPromptFromStdin_ReadError_IsSurfaced` exercise a yet-unwritten `readPromptFromStdin(io.Reader) (string, error)` seam with `strings.Reader` / a failing `errReader`.
+  - `TestRun_EmptyStdin_Bootstraps` locks the A2 contract: piped empty stdin + no `--prompt` → bootstrap, exit 0.
+- TDD: RED — `go test ./cmd/server -run 'Stdin|Prompt'` → build failed: `undefined: readPromptFromStdin` (expected).
+- Verify: `go test ./cmd/server -run 'Stdin|Prompt'` → RED (undefined helper) ✅
+
+## Step 2 (GREEN): stdin fallback in `run`
+- Files: `cmd/server/main.go`, `cmd/server/main_test.go`
+- Agent: /dev
+- Changes:
+  - Added `readPromptFromStdin(r io.Reader)` (whole-stream read, trimmed) and `isTerminal(r io.Reader)` (character-device check via `*os.File` type assertion; injected readers/pipes are never terminals so the seam stays testable — Windows TTY risk from plan mitigated).
+  - `run` signature changed to `run(out io.Writer, stdin io.Reader, args ...string)`; `main()` passes `os.Stdin`. When `--prompt` is empty **and** stdin is not a TTY, one prompt is read from stdin; non-empty → agent loop, empty → bootstrap (A1, A2).
+  - Existing bootstrap/error tests updated to the new signature; `TestRun_NonEmptyStdin_TriggersLoop` proves the piped path spawns the MCP loop (deterministic fail-fast via unresolvable command, no real Gemini/MCP touched).
+- Verify: `go test ./cmd/server -count=1` → PASS (11 tests) ✅
+
+## Step 3: Refactor + diagnostics/exit-code contract
+- Files: `cmd/server/main.go`
+- Agent: /dev
+- Changes:
+  - Confirmed `main()` keeps `fmt.Fprintln(os.Stderr, err)` + `os.Exit(1)`; `runAgentLoop` writes only the final answer via `Fprintln(out, answer)` (A3); tool logs never reach stdout.
+  - `gofmt -l cmd/server/` → empty; `go vet ./cmd/server/...` → PASS.
+  - Manual E2E probe (built binary): empty piped stdin → `bootstrap complete`, EXIT=0; non-empty piped stdin with unresolvable MCP → EXIT=1, diagnostic on stderr only, empty stdout.
+- Verify: `go test ./cmd/server ./... -count=1` → PASS (all 7 packages); `go vet ./cmd/server/...` → PASS; `gofmt -l cmd/server/` → empty ✅
+
+## Step 4: Regression + contract check
+- Files: `cmd/server/main_test.go`
+- Agent: /test
+- Changes:
+  - Existing contracts unchanged: `TestRun_WritesSafeBootstrapStatus`, `TestRun_SmokeUnconfiguredInvocationEndsCleanly`, `TestRun_InvalidConfigDoesNotLeakSecret`, `TestRun_InvalidConfigReturnsError`, `TestRun_FlagParseErrorReturnsCleanError` all pass with the new stdin seam.
+  - `TestRun_NonEmptyStdin_TriggersLoop` + `TestRun_EmptyStdin_Bootstraps` cover the A1/A2 stdin paths; leak test still guards secrets.
+- Verify: `go test ./... -count=1` → PASS (cmd/server 13 tests, all packages green) ✅
+
+## Review pass (before finish)
+- 🔴 Blockers: none.
+- 🟠 Majors: none.
+- 🟡 Minors: `isTerminal` returns false on a `Stat` error (treats an unreadable stdin as piped, reads it) — safe default: worst case bootstrap handles a read failure surfaced to stderr; no hang.
+- ⚪ Nits: none.
